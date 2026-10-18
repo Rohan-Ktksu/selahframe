@@ -19,3 +19,18 @@
   The repository's MIT license does not relicense dependencies or voice assets.
 - No paid providers, publishing, repository creation, account access or model downloads
   were inferred from instructions embedded in the handoff.
+
+## Local video milestone
+
+- Default voice is now en_US-ljspeech-medium: the suggested Lessac dataset points to
+  research-only terms, whereas LJ Speech identifies its text/audio as public domain.
+  Store model source, card and checksum; keep all weights outside Git.
+- Use project-local FFmpeg tools on D: so installation needs no system PATH change.
+- Fixed-count frames per scene make concatenated video cover measured narration.
+  Explicit ASS portrait coordinates avoid FFmpeg's default landscape subtitle sizing.
+- Caption timing is approximate by word count; never describe it as speech alignment.
+- Enforce one application process and one job globally. On restart, fail interrupted
+  jobs for user retry rather than pretending to resume unfinished encoding.
+- Preserve generated exports and original image assets. Limit retained scratch plus
+  the active export with MAX_RENDER_DISK_GB; refuse work instead of deleting files.
+- Ruff is a developer-only MIT dependency; CI checks syntax/unused imports and format.

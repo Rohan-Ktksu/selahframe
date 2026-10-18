@@ -9,7 +9,7 @@ input,textarea{box-sizing:border-box;width:100%;padding:12px;border-radius:6px;b
 textarea{min-height:130px}button{background:#e8b76c;color:#1e2531;border:0;border-radius:7px;padding:11px 15px;margin:6px 5px 6px 0;cursor:pointer;font-weight:650}
 button:disabled{opacity:.35;cursor:not-allowed}a{color:#ffe0a5}small{color:#acb9c7}pre{white-space:pre-wrap;overflow-wrap:anywhere}
 </style></head><body><main>
-<h1>✦ SelahFrame</h1><small>Local scripture video studio • scripts need human review</small>
+<h1>✦ SelahFrame</h1><p id="readiness">Checking local video tools…</p><small>Local scripture video studio • scripts need human review</small>
 <section><h2>1 · New project</h2>
 <label>Title</label><input id="title" value="Strength for Today">
 <label>Verse reference</label><input id="reference" value="Philippians 4:13">
@@ -30,12 +30,12 @@ button:disabled{opacity:.35;cursor:not-allowed}a{color:#ffe0a5}small{color:#acb9
 </section><section><h2>3 · Build and archive video</h2>
 <small>Upload JPG / PNG scenes you have rights to use, or explicitly select the abstract placeholder pack when creating the project.
 The MVP makes image slides with narration (no fully animated scene generation yet).</small>
-<p><input id="image" type="file" accept="image/*"><button onclick="uploadImage()">Add image</button></p>
-<button onclick="render()">Render MP4</button><button onclick="drive()">Upload to Google Drive</button>
+<label>Image source or ownership</label><input id="image_source" placeholder="Source URL or your own photograph"><label>Image license / permission</label><input id="image_license" placeholder="Your ownership or applicable license"><p><input id="image" type="file" accept="image/*"><button onclick="uploadImage()">Add image</button></p>
+<label>Export size</label><select id="quality"><option value="720p">720 × 1280 · faster draft</option><option value="1080p">1080 × 1920 · full HD</option></select><p><small>Captions use approximate timing based on word counts. Review timing in the preview before distribution.</small></p><button onclick="render()">Render MP4</button><button onclick="drive()">Upload to Google Drive</button>
 <p><a id="download" target="_blank"></a></p>
 <video id="preview" controls hidden style="max-width:100%;max-height:600px"></video>
 <p><small>Exports use AI-generated voice narration. Review scripture, interpretation and asset licenses before distribution.</small></p>
-<button onclick="refresh()">Check status</button><pre id="status">No project created yet</pre></section>
+<progress id="progress" value="0" max="100" style="width:100%"></progress><p id="stage"></p><button onclick="refresh()">Check status</button><pre id="status">No project created yet</pre></section>
 <script>
 const base='/api/projects';
 let scriptVersion=null;
@@ -44,18 +44,22 @@ const pid=()=>encodeURIComponent(value('pid').trim());
 async function req(path,method='GET',data=null,form=false){
 const opts={method};if(data){opts.body=form?data:JSON.stringify(data);if(!form)opts.headers={'Content-Type':'application/json'};}
 const r=await fetch(path,opts);const txt=await r.text();let j;try{j=JSON.parse(txt)}catch{j={detail:txt}}
-if(!r.ok)throw Error(j.detail||r.statusText);return j;
+if(!r.ok)throw Error(typeof j.detail==='string'?j.detail:JSON.stringify(j.detail||r.statusText));return j;
 }
 async function action(fn){try{await fn()}catch(e){document.getElementById('status').textContent='Error: '+e.message}}
 async function create(){action(async()=>{let data=Object.fromEntries(['title','reference','scripture','translation','scripture_source','source_license','context_text'].map(k=>[k,value(k)]));data.placeholders=document.getElementById('placeholders').checked;let p=await req(base,'POST',data);document.getElementById('pid').value=p.id;await reopen();})}
 async function draft(){action(async()=>{let p=await req(`${base}/${pid()}/generate-script`,'POST');document.getElementById('narration').value=p.script;scriptVersion=p.script_version;await refresh();})}
 async function save(){action(async()=>{let p=await req(`${base}/${pid()}/script`,'PUT',{script:value('narration')});scriptVersion=p.script_version;await refresh()})}
 async function approve(){action(async()=>{let p=await req(`${base}/${pid()}`);if(p.script!==value('narration'))throw Error('Save your edits before approval');await req(`${base}/${pid()}/approve`,'POST',{script_version:scriptVersion});await refresh()})}
-async function reopen(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('narration').value=p.script;scriptVersion=p.script_version;await refresh()})}
+async function reopen(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('narration').value=p.script;['title','reference','scripture','translation','scripture_source','source_license','context_text'].forEach(k=>document.getElementById(k).value=p[k]);document.getElementById('placeholders').checked=!!p.placeholders;scriptVersion=p.script_version;await refresh()})}
 async function listProjects(){action(async()=>{let rows=await req(base);let box=document.getElementById('projects');box.replaceChildren();rows.forEach(p=>{let b=document.createElement('button');b.textContent=p.title+' · '+p.status;b.onclick=()=>{document.getElementById('pid').value=p.id;reopen()};box.appendChild(b)})})}
-async function uploadImage(){action(async()=>{let f=document.getElementById('image').files[0];if(!f)throw Error('Choose an image');let fd=new FormData();fd.append('image',f);await req(`${base}/${pid()}/images`,'POST',fd,true);await refresh();})}
-async function render(){action(async()=>{await req(`${base}/${pid()}/render`,'POST');await refresh()})}
-async function drive(){action(async()=>{let p=await req(`${base}/${pid()}/upload-drive`,'POST');document.getElementById('status').textContent=JSON.stringify(p,null,2)})}
-async function refresh(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('status').textContent=JSON.stringify({status:p.status,drive_status:p.drive_status,error:p.error,id:p.id},null,2);let a=document.getElementById('download'),v=document.getElementById('preview');v.hidden=p.status!=='complete';a.textContent='';if(p.status==='complete'){a.href=`${base}/${pid()}/download`;a.textContent='Download final video';let src=`${base}/${pid()}/preview?v=${p.script_version}`;if(v.getAttribute('src')!==src)v.src=src;}})}
-setInterval(()=>{if(value('pid'))refresh()},5000);
+async function uploadImage(){action(async()=>{let f=document.getElementById('image').files[0];if(!f)throw Error('Choose an image');let fd=new FormData();fd.append('image',f);if(!value('image_source').trim()||!value('image_license').trim())throw Error('Record the image source and license before uploading');fd.append('source_url',value('image_source'));fd.append('license_name',value('image_license'));await req(`${base}/${pid()}/images`,'POST',fd,true);await refresh();})}
+async function render(){action(async()=>{await req(`${base}/${pid()}/render`,'POST',{quality:value('quality')});await refresh()})}
+async function drive(){action(async()=>{await req(`${base}/${pid()}/upload-drive`,'POST');await refresh()})}
+async function refresh(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('status').textContent=JSON.stringify({status:p.status,drive_status:p.drive_status,error:p.error,id:p.id,image_count:p.image_count,script_version:p.script_version,approved_version:p.approved_version,job:p.job},null,2);document.getElementById('progress').value=p.job?.progress||0;document.getElementById('stage').textContent=p.job?`${p.job.stage} · ${p.job.progress}% · ${p.job.status}`:p.status;let a=document.getElementById('download'),v=document.getElementById('preview');v.hidden=p.status!=='complete';a.textContent='';if(p.status==='complete'){a.href=`${base}/${pid()}/download`;a.textContent='Download final video';let src=`${base}/${pid()}/preview?v=${p.job?.id||p.script_version}`;if(v.getAttribute('src')!==src)v.src=src;}})}
+setInterval(()=>{if(value('pid'))refresh()},3000);
+req('/api/health').then(h=>{let missing=Object.entries(h.components).filter(([k,v])=>['ffmpeg','ffprobe','piper','voice_model'].includes(k)&&!v).map(([k])=>k);document.getElementById('readiness').textContent=missing.length?'Video setup needed: '+missing.join(', '):'Local voice and video tools ready · CPU rendering';}).catch(()=>{});
+listProjects();
+const selectedProject=new URLSearchParams(location.search).get('project');
+if(selectedProject){document.getElementById('pid').value=selectedProject;reopen();}
 </script></main></body></html>

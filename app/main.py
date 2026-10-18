@@ -1,26 +1,26 @@
+import io
 import json
 import os
 import re
 import shutil
 import sqlite3
 import subprocess
-import sys
 import threading
 import uuid
-import io
 import warnings
-import importlib.util
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from contextlib import contextmanager
+from typing import Literal
 
 import requests
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.responses import JSONResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel, Field
-from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from PIL import Image
+from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from app import media
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -34,12 +34,53 @@ OUTPUT.mkdir(exist_ok=True)
 PIPER_DATA_DIR = ROOT / "voices"
 PIPER_DATA_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="SelahFrame", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(application):
+    # Only one process may own jobs in this checkout. Importing this module has no DB side effects.
+    handle = (DATA / "server.lock").open("a+b")
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    handle.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise RuntimeError(
+            "SelahFrame is already running from this folder. Use the existing server."
+        )
+    try:
+        initialize()
+        yield
+    finally:
+        handle.close()
+
+
+app = FastAPI(title="SelahFrame", version="0.2.0", lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
 
 @app.middleware("http")
 async def local_origin_guard(request, call_next):
+    if request.method == "POST" and request.url.path.endswith("/images"):
+        length = request.headers.get("content-length", "")
+        if not length.isdecimal():
+            return JSONResponse(
+                {"detail": "An image upload requires Content-Length"}, status_code=411
+            )
+        if int(length) > MAX_UPLOAD_BYTES + 1024 * 1024:
+            return JSONResponse(
+                {"detail": "Image upload exceeds the request size limit"},
+                status_code=413,
+            )
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
         origin = request.headers.get("origin")
         if origin and origin not in {"http://127.0.0.1:8000", "http://localhost:8000"}:
@@ -53,6 +94,7 @@ def connection():
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA busy_timeout=30000")
+    c.execute("PRAGMA foreign_keys=ON")
     try:
         with c:
             yield c
@@ -72,6 +114,7 @@ def initialize():
         )""")
         columns = {r[1] for r in c.execute("PRAGMA table_info(projects)")}
         for name, definition in {
+            "image_revision": "INTEGER NOT NULL DEFAULT 0",
             "script_version": "INTEGER NOT NULL DEFAULT 0",
             "approved_version": "INTEGER",
             "translation": "TEXT NOT NULL DEFAULT ''",
@@ -82,8 +125,48 @@ def initialize():
         }.items():
             if name not in columns:
                 c.execute(f"ALTER TABLE projects ADD COLUMN {name} {definition}")
-        c.execute("UPDATE projects SET status='failed', error='App stopped during render. Retry the approved script.' WHERE status='rendering'")
-initialize()
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS scripts (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                version INTEGER NOT NULL, narration_text TEXT NOT NULL, approved_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(project_id, version));
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                stage TEXT NOT NULL, status TEXT NOT NULL, progress INTEGER DEFAULT 0,
+                attempts INTEGER DEFAULT 1, error TEXT DEFAULT '', snapshot_json TEXT NOT NULL,
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP, finished_at TEXT);
+            CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs(status, started_at);
+            CREATE TABLE IF NOT EXISTS assets (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                type TEXT NOT NULL, local_path TEXT NOT NULL, source_url TEXT NOT NULL,
+                license_name TEXT NOT NULL, checksum TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS exports (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                job_id TEXT NOT NULL REFERENCES jobs(id), script_version INTEGER NOT NULL,
+                image_revision INTEGER NOT NULL, quality TEXT NOT NULL, file_path TEXT NOT NULL,
+                width INTEGER NOT NULL, height INTEGER NOT NULL, duration_ms INTEGER NOT NULL,
+                checksum TEXT NOT NULL, drive_status TEXT DEFAULT '', drive_path TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE INDEX IF NOT EXISTS exports_project_idx ON exports(project_id, created_at);
+        """)
+        export_columns = {r[1] for r in c.execute("PRAGMA table_info(exports)")}
+        if "pipeline_signature" not in export_columns:
+            c.execute("ALTER TABLE exports ADD COLUMN pipeline_signature TEXT NOT NULL DEFAULT ''")
+        c.execute("PRAGMA user_version=2")
+        c.execute("UPDATE projects SET script_version=1 WHERE script_version=0 AND script<>''")
+        c.execute(
+            "INSERT OR IGNORE INTO scripts (id, project_id, version, narration_text, approved_at) SELECT id, id, script_version, script, CASE WHEN approved_version=script_version THEN CURRENT_TIMESTAMP ELSE NULL END FROM projects WHERE script<>''"
+        )
+        c.execute(
+            "UPDATE jobs SET status='failed', error='App stopped during this job. Retry explicitly.', finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued', 'running')"
+        )
+        c.execute(
+            "UPDATE projects SET status='complete', drive_status='failed' WHERE status='uploading'"
+        )
+        c.execute(
+            "UPDATE projects SET status='failed', error='App stopped during render. Retry the approved script.' WHERE status='rendering'"
+        )
 
 
 class NewProject(BaseModel):
@@ -101,6 +184,10 @@ class EditedScript(BaseModel):
     script: str = Field(min_length=10, max_length=10000)
 
 
+class RenderSettings(BaseModel):
+    quality: Literal["720p", "1080p"] = "720p"
+
+
 class Approval(BaseModel):
     script_version: int = Field(ge=1)
 
@@ -115,7 +202,18 @@ def load_project(project_id):
         row = c.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "Project not found")
-    return dict(row)
+    project = dict(row)
+    with connection() as c:
+        job = c.execute(
+            "SELECT id, stage, status, progress, error FROM jobs WHERE project_id=? ORDER BY rowid DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        project["job"] = dict(job) if job else None
+        project["image_count"] = c.execute(
+            "SELECT COUNT(*) FROM assets WHERE project_id=? AND type='image'",
+            (project_id,),
+        ).fetchone()[0]
+    return project
 
 
 def update_project(project_id, **fields):
@@ -123,8 +221,7 @@ def update_project(project_id, **fields):
         return
     cols = ", ".join(f"{k}=?" for k in fields)
     with connection() as c:
-        c.execute(f"UPDATE projects SET {cols} WHERE id=?",
-                  [*fields.values(), project_id])
+        c.execute(f"UPDATE projects SET {cols} WHERE id=?", [*fields.values(), project_id])
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -134,9 +231,17 @@ def home():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "mode": "local-only", "components": {
-        name: bool(shutil.which(name)) for name in ("ffmpeg", "ffprobe", "ollama", "rclone")
-    }, "piper": importlib.util.find_spec("piper") is not None}
+    return {
+        "ok": True,
+        "mode": "local-only",
+        "components": {
+            **media.readiness(),
+            "ollama": bool(shutil.which("ollama")),
+            "rclone": bool(shutil.which("rclone")),
+        },
+        "caption_timing": "approximate",
+        "max_concurrent_jobs": 1,
+    }
 
 
 @app.post("/api/projects")
@@ -145,8 +250,17 @@ def create_project(payload: NewProject):
     with connection() as c:
         c.execute(
             "INSERT INTO projects (id, reference, scripture, title, translation, scripture_source, source_license, context_text, placeholders) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (pid, payload.reference, payload.scripture, payload.title, payload.translation,
-             payload.scripture_source, payload.source_license, payload.context_text, payload.placeholders)
+            (
+                pid,
+                payload.reference,
+                payload.scripture,
+                payload.title,
+                payload.translation,
+                payload.scripture_source,
+                payload.source_license,
+                payload.context_text,
+                payload.placeholders,
+            ),
         )
     (OUTPUT / pid / "images").mkdir(parents=True, exist_ok=True)
     return load_project(pid)
@@ -175,25 +289,34 @@ Start with a relatable modern-life hook, explain the meaning in its context,
 give one everyday analogy and conclude with a gentle encouragement.
 Use clear conversational English and no markdown, no scene directions.
 The passage reference is {project["reference"]}.
-Adjacent context supplied by the reviewer: {project['context_text']}
+Adjacent context supplied by the reviewer: {project["context_text"]}
 The verified scripture text is:
 {project["scripture"]}
 Return only narration text."""
     try:
         response = requests.post(
             os.getenv("OLLAMA_URL", "http://127.0.0.1:11434") + "/api/generate",
-            json={"model": os.getenv("OLLAMA_MODEL", "gemma3:1b"),
-                  "prompt": prompt, "stream": False,
-                  "options": {"temperature": 0.4, "num_predict": 300}},
-            timeout=300
+            json={
+                "model": os.getenv("OLLAMA_MODEL", "gemma3:1b"),
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.4, "num_predict": 300},
+            },
+            timeout=300,
         )
         response.raise_for_status()
-        narration = response.json()["response"].strip()
+        raw = response.json()["response"]
+        if not isinstance(raw, str):
+            raise ValueError("Invalid narration type")
+        narration = EditedScript(script=raw.strip()).script
         if not narration:
             raise ValueError("AI returned empty narration")
-    except (requests.RequestException, ValueError, KeyError) as exc:
-        raise HTTPException(503, "Ollama unavailable or invalid response. Start Ollama or write narration manually.") from exc
-    save_script(pid, EditedScript(script=narration).script)
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(
+            503,
+            "Ollama unavailable or invalid response. Start Ollama or write narration manually.",
+        ) from exc
+    save_script(pid, narration, expected_version=project["script_version"])
     return load_project(pid)
 
 
@@ -204,13 +327,25 @@ def edit_script(pid: str, payload: EditedScript):
     return load_project(pid)
 
 
-def save_script(pid, text):
+def save_script(pid, text, expected_version=None):
     with connection() as c:
         c.execute("BEGIN IMMEDIATE")
-        row = c.execute("SELECT status FROM projects WHERE id=?", (pid,)).fetchone()
-        if row[0] == "rendering":
+        row = c.execute("SELECT status, script_version FROM projects WHERE id=?", (pid,)).fetchone()
+        if expected_version is not None and row["script_version"] != expected_version:
+            raise HTTPException(
+                409,
+                "The script changed while drafting. Review your saved edits before generating again.",
+            )
+        if row[0] in {"rendering", "uploading"}:
             raise HTTPException(409, "Wait for the current render before editing")
-        c.execute("UPDATE projects SET script=?, script_version=script_version+1, approved_version=NULL, status='review', error='', drive_status='' WHERE id=?", (text, pid))
+        c.execute(
+            "UPDATE projects SET script=?, script_version=script_version+1, approved_version=NULL, status='review', error='', drive_status='' WHERE id=?",
+            (text, pid),
+        )
+        c.execute(
+            "INSERT INTO scripts (id, project_id, version, narration_text) SELECT ?, id, script_version, script FROM projects WHERE id=?",
+            (str(uuid.uuid4()), pid),
+        )
 
 
 @app.post("/api/projects/{pid}/approve")
@@ -220,24 +355,42 @@ def approve(pid: str, payload: Approval):
         raise HTTPException(400, "Generate or write narration first")
     with connection() as c:
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("SELECT status FROM projects WHERE id=?", (pid,)).fetchone()[0] == "rendering":
+        if c.execute("SELECT status FROM projects WHERE id=?", (pid,)).fetchone()[0] in {
+            "rendering",
+            "uploading",
+        }:
             raise HTTPException(409, "Render in progress")
-        if c.execute("SELECT script_version FROM projects WHERE id=?", (pid,)).fetchone()[0] != payload.script_version:
+        if (
+            c.execute("SELECT script_version FROM projects WHERE id=?", (pid,)).fetchone()[0]
+            != payload.script_version
+        ):
             raise HTTPException(409, "Script changed. Reload and review the latest version")
-        c.execute("UPDATE projects SET approved_version=script_version, status='approved' WHERE id=?", (pid,))
+        c.execute(
+            "UPDATE projects SET approved_version=script_version, status='approved' WHERE id=?",
+            (pid,),
+        )
+        c.execute(
+            "UPDATE scripts SET approved_at=CURRENT_TIMESTAMP WHERE project_id=? AND version=?",
+            (pid, payload.script_version),
+        )
     return load_project(pid)
 
 
 @app.post("/api/projects/{pid}/images")
-async def upload_image(pid: str, image: UploadFile = File(...)):
-    if load_project(pid)["status"] == "rendering":
+async def upload_image(
+    pid: str,
+    image: UploadFile = File(...),
+    source_url: str = Form(..., min_length=1, max_length=1000),
+    license_name: str = Form(..., min_length=1, max_length=500),
+):
+    if load_project(pid)["status"] in {"rendering", "uploading"}:
         raise HTTPException(409, "Wait for the render before adding images")
     ext = Path(image.filename or "").suffix.lower()
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
         raise HTTPException(400, "Only JPG, PNG and WebP allowed")
     data = await image.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "Maximum image size is 12 MB")
+        raise HTTPException(413, f"Maximum image size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
     path = OUTPUT / pid / "images" / (str(uuid.uuid4()) + ext)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -253,171 +406,454 @@ async def upload_image(pid: str, image: UploadFile = File(...)):
     except Exception as exc:
         path.unlink(missing_ok=True)
         raise HTTPException(400, "Invalid image file") from exc
-    return {"filename": path.name, "count": len(list(path.parent.glob("*")))}
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        state = c.execute("SELECT status FROM projects WHERE id=?", (pid,)).fetchone()[0]
+        count = c.execute(
+            "SELECT COUNT(*) FROM assets WHERE project_id=? AND type='image'", (pid,)
+        ).fetchone()[0]
+        if state in {"rendering", "uploading"} or count >= 24:
+            path.unlink(missing_ok=True)
+            raise HTTPException(409, "Project is busy or has reached the 24-image limit")
+        c.execute(
+            "INSERT INTO assets (id, project_id, type, local_path, source_url, license_name, checksum) VALUES (?, ?, 'image', ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                pid,
+                str(path),
+                source_url,
+                license_name,
+                media.digest(path),
+            ),
+        )
+        c.execute(
+            "UPDATE projects SET image_revision=image_revision+1, status=CASE WHEN approved_version=script_version THEN 'approved' ELSE status END, drive_status='' WHERE id=?",
+            (pid,),
+        )
+    return {"filename": path.name, "count": count + 1}
 
 
 def run(cmd, timeout=600, input_text=None):
-    result = subprocess.run(cmd, capture_output=True, text=True,
-                            input=input_text, encoding="utf-8", timeout=timeout, check=False)
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        input=input_text,
+        encoding="utf-8",
+        timeout=timeout,
+        check=False,
+    )
     if result.returncode:
-        raise RuntimeError(f"{Path(cmd[0]).name} failed (exit {result.returncode}). Check installation, inputs and available disk space.")
+        raise RuntimeError(
+            f"{Path(cmd[0]).name} failed (exit {result.returncode}). Check installation, inputs and available disk space."
+        )
 
 
-def placeholder_images(pid, count=6):
-    folder = OUTPUT / pid / "images"
-    if list(folder.iterdir()):
-        return
-    palettes = [
-        ((24, 40, 58), (203, 142, 84)), ((41, 29, 46), (184, 131, 107)),
-        ((35, 45, 41), (181, 149, 100)), ((29, 40, 61), (156, 127, 88)),
-        ((48, 38, 34), (192, 143, 91)), ((28, 48, 59), (190, 157, 111))
-    ]
-    for i in range(count):
-        a, b = palettes[i % len(palettes)]
-        im = Image.new("RGB", (720, 1280))
-        px = im.load()
-        for y in range(1280):
-            f = y / 1279
-            col = tuple(int(a[k] * (1 - f) + b[k] * f) for k in range(3))
-            for x in range(720):
-                px[x, y] = col
-        draw = ImageDraw.Draw(im)
-        draw.ellipse((240, 270, 480, 510), fill=(223, 181, 112))
-        draw.text((40, 1120), "Replace with your licensed cinematic scene", fill="white")
-        im.save(folder / f"placeholder_{i+1:02}.jpg", quality=90)
+def start_worker(target, args):
+    threading.Thread(target=target, args=args, daemon=True).start()
 
 
-def render_worker(pid: str):
+def progress_job(job_id, stage, progress):
+    with connection() as c:
+        c.execute(
+            "UPDATE jobs SET stage=?, progress=? WHERE id=? AND status='running'",
+            (stage, progress, job_id),
+        )
+
+
+def render_worker(pid: str, job_id: str):
     try:
-        project = load_project(pid)
-        missing = [name for name in ("ffmpeg", "ffprobe") if not shutil.which(name)]
-        if importlib.util.find_spec("piper") is None:
-            missing.append("piper-tts")
-        if missing:
-            update_project(pid, status="failed", error="Missing dependencies: " + ", ".join(missing) + ". See docs/INSTALL_WINDOWS.md, then retry.")
-            return
-        folder = OUTPUT / pid
-        folder.mkdir(parents=True, exist_ok=True)
-        voice = folder / "narration.wav"
-        cmd = [
-            sys.executable, "-m", "piper",
-            "-m", os.getenv("PIPER_MODEL", "en_US-lessac-medium"),
-            "--data-dir", os.getenv("PIPER_DATA_DIR", str(PIPER_DATA_DIR)),
-            "-f", str(voice)
+        with connection() as c:
+            job = c.execute("SELECT snapshot_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+        snapshot = json.loads(job[0])
+        folder = OUTPUT / pid / "exports" / job_id
+        image_paths = [Path(item["local_path"]) for item in snapshot["images"]]
+        for path in image_paths:
+            path.resolve().relative_to((OUTPUT / pid / "images").resolve())
+            if not path.is_file():
+                raise media.MediaError(
+                    "A selected image is missing. Restore it or upload another image."
+                )
+        info = media.render(
+            snapshot,
+            image_paths,
+            folder,
+            ROOT / "temp" / job_id,
+            lambda stage, pct: progress_job(job_id, stage, pct),
+        )
+        provenance = []
+        for idx, path in enumerate(sorted((folder / "images").glob("*.jpg"))):
+            source = (
+                snapshot["images"][idx]
+                if image_paths
+                else {
+                    "source_url": "SelahFrame abstract placeholder pack",
+                    "license_name": "Project-generated geometric illustration; no third-party image",
+                }
+            )
+            provenance.append(
+                {
+                    "file": "images/" + path.name,
+                    "source_url": source["source_url"],
+                    "license_name": source["license_name"],
+                    "checksum": media.digest(path),
+                }
+            )
+        export_manifest = {
+            **snapshot,
+            **info,
+            "images": provenance,
+            "disclosure": "AI-generated voice narration",
+            "voice_source": media.VOICE_SOURCE
+            if info["voice"].startswith("en_US-ljspeech-")
+            else os.getenv("PIPER_SOURCE", "User-configured voice"),
+            "voice_license": "MIT model repository; public-domain LJ Speech dataset"
+            if info["voice"].startswith("en_US-ljspeech-")
+            else os.getenv("PIPER_LICENSE", "User must verify"),
+            "placeholder_pack_used": not bool(image_paths),
+        }
+        generated_assets = [
+            (
+                "voice",
+                folder / "narration.wav",
+                export_manifest["voice_source"],
+                export_manifest["voice_license"],
+            ),
+            (
+                "subtitle",
+                folder / "captions.srt",
+                "Approved narration; approximate timing",
+                "Project-generated captions",
+            ),
+            (
+                "subtitle",
+                folder / "captions.ass",
+                "Approved narration; approximate timing",
+                "Project-generated captions",
+            ),
+            (
+                "video",
+                folder / "final.mp4",
+                "Local Piper/FFmpeg render",
+                "Uses the licenses listed in this manifest",
+            ),
         ]
-        run(cmd, timeout=300, input_text=project["script"])
-        if not voice.exists():
-            raise RuntimeError("Piper did not produce narration.wav")
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(voice)],
-            capture_output=True, text=True, check=True, timeout=30
-        )
-        duration = float(probe.stdout.strip())
-        if duration <= 0:
-            raise RuntimeError("Invalid narration duration")
-        if project["placeholders"]:
-            placeholder_images(pid)
-        imgs = sorted((folder / "images").glob("*"))
-        imgs = [p for p in imgs if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}]
-        if not imgs:
-            raise RuntimeError("No usable images found")
-        # Each image has equal duration; duration comes from generated voiceover.
-        seconds_per_image = duration / len(imgs)
-        clips = []
-        for idx, img in enumerate(imgs):
-            clip = folder / f"clip_{idx:02}.mp4"
-            run(["ffmpeg", "-y", "-loop", "1", "-framerate", "25",
-                 "-i", str(img), "-t", f"{seconds_per_image:.4f}",
-                 "-vf", "scale=720:1280:force_original_aspect_ratio=increase,"
-                        "crop=720:1280,format=yuv420p",
-                 "-c:v", "libx264", "-preset", "ultrafast",
-                 "-crf", "25", "-r", "25", str(clip)], timeout=600)
-            clips.append(clip)
-        concat = folder / "concat.txt"
-        concat.write_text(
-            "".join("file '{}'\n".format(str(c).replace("\\", "/").replace("'", "'\\''"))
-                    for c in clips), encoding="utf8"
-        )
-        video = folder / "final.mp4"
-        run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-             "-i", str(concat), "-i", str(voice),
-             "-map", "0:v:0", "-map", "1:a:0",
-             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
-             "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
-             "-movflags", "+faststart", "-shortest", str(video)], timeout=900)
-        (folder / "script.txt").write_text(project["script"], encoding="utf8")
-        (folder / "export.json").write_text(json.dumps({
-            "script_version": project["approved_version"],
-            "narration": project["script"], "scripture": project["scripture"],
-            "translation": project["translation"], "source": project["scripture_source"],
-            "license": project["source_license"], "disclosure": "AI-generated voice narration",
-            "placeholder_pack_selected": bool(project["placeholders"]),
-        }, indent=2), encoding="utf8")
-        update_project(pid, status="complete")
+        export_manifest["asset_checksums"] = {
+            path.name: media.digest(path) for _, path, _, _ in generated_assets
+        }
+        (folder / "export.json").write_text(json.dumps(export_manifest, indent=2), encoding="utf-8")
+        with connection() as c:
+            for kind, path, source, license_name in generated_assets:
+                c.execute(
+                    "INSERT INTO assets (id, project_id, type, local_path, source_url, license_name, checksum) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()),
+                        pid,
+                        kind,
+                        str(path),
+                        source,
+                        license_name,
+                        media.digest(path),
+                    ),
+                )
+            c.execute(
+                "INSERT INTO exports (id, project_id, job_id, script_version, image_revision, quality, file_path, width, height, duration_ms, checksum, pipeline_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    pid,
+                    job_id,
+                    snapshot["approved_version"],
+                    snapshot["image_revision"],
+                    snapshot["quality"],
+                    info["file_path"],
+                    info["width"],
+                    info["height"],
+                    info["duration_ms"],
+                    info["sha256"],
+                    snapshot["pipeline_signature"],
+                ),
+            )
+            c.execute(
+                "UPDATE jobs SET status='complete', stage='complete', progress=100, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+            c.execute(
+                "UPDATE projects SET status='complete', error='', drive_status='' WHERE id=?",
+                (pid,),
+            )
     except Exception as exc:
-        update_project(pid, status="failed", error=f"Render failed ({type(exc).__name__}). Run scripts/doctor-windows.ps1, check voice model and images, then retry.")
+        message = (
+            str(exc)
+            if isinstance(exc, media.MediaError)
+            else "Render failed. Check your voice model, image files and available disk space, then retry."
+        )
+        with connection() as c:
+            c.execute(
+                "UPDATE jobs SET status='failed', error=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (message, job_id),
+            )
+            c.execute(
+                "UPDATE projects SET status='failed', error=? WHERE id=?",
+                (message, pid),
+            )
 
 
-@app.post("/api/projects/{pid}/render")
-def render(pid: str):
-    project = load_project(pid)
+@app.post("/api/projects/{pid}/render", status_code=202)
+def render(pid: str, payload: RenderSettings | None = None):
+    load_project(pid)
+    quality = (payload or RenderSettings()).quality
+    pipeline_signature = media.pipeline_signature()
     with connection() as c:
         c.execute("BEGIN IMMEDIATE")
         project = dict(c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
-        if project["status"] == "rendering":
-            return {"status": "rendering", "id": pid}
-        if project["approved_version"] != project["script_version"] or not project["approved_version"]:
+        active = c.execute("SELECT * FROM jobs WHERE status IN ('queued', 'running')").fetchone()
+        if active:
+            if (
+                active["project_id"] == pid
+                and active["stage"] != "drive"
+                and json.loads(active["snapshot_json"]).get("quality") == quality
+            ):
+                return {"status": active["status"], "id": pid, "job_id": active["id"]}
+            raise HTTPException(409, "Another job is active. Wait for it to finish and retry.")
+        if (
+            project["approved_version"] != project["script_version"]
+            or not project["approved_version"]
+        ):
             raise HTTPException(409, "Approve the current script before rendering")
-        if c.execute("SELECT 1 FROM projects WHERE status='rendering'").fetchone():
-            raise HTTPException(409, "Another project is rendering. Try again when it finishes.")
-        if not project["placeholders"] and not any((OUTPUT / pid / "images").glob("*.jpg")):
-            raise HTTPException(409, "Upload licensed images or create a project with the labeled placeholder pack")
+        previous = c.execute(
+            "SELECT * FROM exports WHERE project_id=? AND script_version=? AND image_revision=? AND quality=? AND pipeline_signature=? ORDER BY rowid DESC LIMIT 1",
+            (
+                pid,
+                project["script_version"],
+                project["image_revision"],
+                quality,
+                pipeline_signature,
+            ),
+        ).fetchone()
+        if previous and Path(previous["file_path"]).is_file():
+            c.execute("UPDATE projects SET status='complete', error='' WHERE id=?", (pid,))
+            return {"status": "complete", "id": pid, "job_id": previous["job_id"]}
+        project["images"] = [
+            dict(r)
+            for r in c.execute(
+                "SELECT * FROM assets WHERE project_id=? AND type='image' ORDER BY rowid",
+                (pid,),
+            )
+        ]
+        if not project["placeholders"] and not project["images"]:
+            raise HTTPException(
+                409, "Upload licensed images or choose the labeled placeholder pack"
+            )
+        project["quality"] = quality
+        project["pipeline_signature"] = pipeline_signature
+        job_id = str(uuid.uuid4())
+        c.execute(
+            "INSERT INTO jobs (id, project_id, stage, status, snapshot_json) VALUES (?, ?, 'preflight', 'running', ?)",
+            (job_id, pid, json.dumps(project)),
+        )
         c.execute("UPDATE projects SET status='rendering', error='' WHERE id=?", (pid,))
-    threading.Thread(target=render_worker, args=(pid,), daemon=True).start()
-    return {"status": "rendering", "id": pid}
+    try:
+        start_worker(render_worker, (pid, job_id))
+    except RuntimeError:
+        with connection() as c:
+            c.execute(
+                "UPDATE jobs SET status='failed', error='Cannot start worker. Restart app.', finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+            c.execute(
+                "UPDATE projects SET status='failed', error='Cannot start worker. Restart app.' WHERE id=?",
+                (pid,),
+            )
+        raise HTTPException(503, "Cannot start worker. Restart app.")
+    return {"status": "running", "id": pid, "job_id": job_id}
+
+
+@app.get("/api/v1/jobs/{job_id}")
+def get_job(job_id: str):
+    with connection() as c:
+        job = c.execute(
+            "SELECT id, project_id, stage, status, progress, attempts, error, started_at, finished_at FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return dict(job)
+
+
+@app.get("/api/projects/{pid}/scripts")
+def script_history(pid: str):
+    load_project(pid)
+    with connection() as c:
+        return [
+            dict(r)
+            for r in c.execute(
+                "SELECT version, narration_text, approved_at, created_at FROM scripts WHERE project_id=? ORDER BY version DESC",
+                (pid,),
+            )
+        ]
+
+
+@app.get("/api/projects/{pid}/exports")
+def export_history(pid: str):
+    load_project(pid)
+    with connection() as c:
+        return [
+            dict(r)
+            for r in c.execute(
+                "SELECT id, script_version, quality, width, height, duration_ms, drive_status, created_at FROM exports WHERE project_id=? ORDER BY rowid DESC",
+                (pid,),
+            )
+        ]
+
+
+def current_export(pid):
+    project = load_project(pid)
+    if (
+        project["status"] not in {"complete", "uploading"}
+        or project["approved_version"] != project["script_version"]
+    ):
+        raise HTTPException(409, "Render the approved version first")
+    with connection() as c:
+        row = c.execute(
+            "SELECT * FROM exports WHERE project_id=? AND script_version=? AND image_revision=? ORDER BY rowid DESC LIMIT 1",
+            (pid, project["approved_version"], project["image_revision"]),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Video is not ready")
+    export = dict(row)
+    path = Path(export["file_path"]).resolve()
+    try:
+        path.relative_to((OUTPUT / pid).resolve())
+    except ValueError:
+        raise HTTPException(409, "Invalid export path")
+    if not path.is_file():
+        raise HTTPException(404, "Export file is missing. Retry rendering.")
+    return export
 
 
 @app.get("/api/projects/{pid}/download")
 def download(pid: str):
-    if load_project(pid)["status"] != "complete":
-        raise HTTPException(409, "Render the approved version first")
-    path = OUTPUT / pid / "final.mp4"
-    if not path.exists():
-        raise HTTPException(404, "Video is not ready")
-    return FileResponse(path, filename=f"bible-{pid}.mp4", media_type="video/mp4")
+    export = current_export(pid)
+    return FileResponse(
+        export["file_path"], filename=f"selahframe-{pid}.mp4", media_type="video/mp4"
+    )
 
 
 @app.get("/api/projects/{pid}/preview")
 def preview(pid: str):
-    if load_project(pid)["status"] != "complete":
-        raise HTTPException(409, "Render the approved version first")
-    path = OUTPUT / pid / "final.mp4"
-    if not path.is_file():
-        raise HTTPException(404, "Video is not ready")
-    return FileResponse(path, media_type="video/mp4")
+    return FileResponse(current_export(pid)["file_path"], media_type="video/mp4")
 
 
-@app.post("/api/projects/{pid}/upload-drive")
-def upload_drive(pid: str):
-    if load_project(pid)["status"] != "complete":
-        raise HTTPException(409, "Render the approved version first")
-    folder = OUTPUT / pid
-    if not (folder / "final.mp4").exists():
-        raise HTTPException(409, "Render video before uploading")
+def drive_worker(pid, job_id, export):
+    folder = Path(export["file_path"]).parent
     remote = os.getenv("RCLONE_REMOTE", "bibledrive")
-    dest = "Bible-AI-Studio/Projects"
+    dest = f"{remote}:Bible-AI-Studio/Projects/{pid}"
+    try:
+        run(["rclone", "copy", str(folder), dest, "--retries", "2"], timeout=900)
+        progress_job(job_id, "drive-verify", 75)
+        run(
+            ["rclone", "check", str(folder), dest, "--one-way", "--size-only"],
+            timeout=900,
+        )
+        with connection() as c:
+            c.execute(
+                "UPDATE exports SET drive_status='verified-size', drive_path=? WHERE id=?",
+                (dest, export["id"]),
+            )
+            c.execute(
+                "UPDATE projects SET status='complete', drive_status='verified-size', error='' WHERE id=?",
+                (pid,),
+            )
+            c.execute(
+                "UPDATE jobs SET status='complete', stage='complete', progress=100, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+        error = "Drive upload or verification failed. Check rclone and authorize bibledrive, then retry. All local files were retained."
+        with connection() as c:
+            c.execute("UPDATE exports SET drive_status='failed' WHERE id=?", (export["id"],))
+            c.execute(
+                "UPDATE projects SET status='complete', drive_status='failed', error=? WHERE id=?",
+                (error, pid),
+            )
+            c.execute(
+                "UPDATE jobs SET status='failed', error=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (error, job_id),
+            )
+
+
+@app.post("/api/projects/{pid}/upload-drive", status_code=202)
+def upload_drive(pid: str):
+    export = current_export(pid)
+    remote = os.getenv("RCLONE_REMOTE", "bibledrive")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", remote):
         raise HTTPException(400, "Invalid rclone remote name")
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        active = c.execute("SELECT * FROM jobs WHERE status IN ('queued', 'running')").fetchone()
+        if active:
+            if active["project_id"] == pid and active["stage"].startswith("drive"):
+                return {"job_id": active["id"], "status": active["status"]}
+            raise HTTPException(409, "Another job is active")
+        # Recheck after acquiring the mutation lock.
+        current = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if (
+            current["approved_version"] != export["script_version"]
+            or current["image_revision"] != export["image_revision"]
+        ):
+            raise HTTPException(409, "Project changed. Render the current version first.")
+        job_id = str(uuid.uuid4())
+        c.execute(
+            "INSERT INTO jobs (id, project_id, stage, status, snapshot_json) VALUES (?, ?, 'drive', 'running', ?)",
+            (job_id, pid, json.dumps({"export_id": export["id"]})),
+        )
+        c.execute(
+            "UPDATE projects SET status='uploading', drive_status='uploading', error='' WHERE id=?",
+            (pid,),
+        )
     try:
-        run(["rclone", "copy", str(folder),
-             f"{remote}:{dest}/{pid}", "--exclude", "clip_*.mp4",
-             "--exclude", "concat.txt", "--progress"], timeout=900)
-        run(["rclone", "check", str(folder), f"{remote}:{dest}/{pid}",
-             "--one-way", "--size-only", "--exclude", "clip_*.mp4",
-             "--exclude", "concat.txt"], timeout=900)
-    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
-        update_project(pid, drive_status="failed")
-        raise HTTPException(503, "Drive upload or verification failed. Check rclone configuration and retry; local files were retained.") from exc
-    update_project(pid, drive_status="verified-size")
-    return {"status": "verified-size", "path": f"{dest}/{pid}"}
+        start_worker(drive_worker, (pid, job_id, export))
+    except RuntimeError:
+        with connection() as c:
+            c.execute(
+                "UPDATE jobs SET status='failed', error='Cannot start worker. Restart app.', finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+            c.execute(
+                "UPDATE projects SET status='complete', drive_status='failed', error='Cannot start worker. Restart app.' WHERE id=?",
+                (pid,),
+            )
+        raise HTTPException(503, "Cannot start worker. Restart app.")
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/projects/{pid}/drive")
+def drive_status(pid: str):
+    project = load_project(pid)
+    with connection() as c:
+        export = c.execute(
+            "SELECT drive_path, drive_status FROM exports WHERE project_id=? ORDER BY rowid DESC LIMIT 1",
+            (pid,),
+        ).fetchone()
+    return {
+        "status": project["drive_status"],
+        "export": dict(export) if export else None,
+    }
+
+
+# Versioned API, with legacy dashboard routes retained during migration.
+for route in list(app.routes):
+    path = getattr(route, "path", "")
+    if path.startswith("/api/projects"):
+        new_path = path.replace("/api/projects", "/api/v1/projects", 1)
+        new_path = (
+            new_path.replace("/generate-script", "/script:generate")
+            .replace("/approve", "/script:approve")
+            .replace("/upload-drive", "/drive:upload")
+        )
+        app.add_api_route(
+            new_path,
+            route.endpoint,
+            methods=list(route.methods),
+            status_code=route.status_code,
+        )

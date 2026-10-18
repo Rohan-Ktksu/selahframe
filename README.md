@@ -1,28 +1,34 @@
-# SelahFrame — Windows implementation checkpoint
+# SelahFrame
 
-Local FastAPI/SQLite app for verified Bible passages and human-reviewed narration.
-This is a partial implementation of the supplied Astra plan, not a completed video MVP.
+A private, local scripture video studio for Windows. Paste a verified passage,
+write or draft narration, review and approve the exact script version, add licensed
+images (or explicitly select abstract placeholders), then render a vertical MP4.
 
-The repaired workflow includes passage provenance fields, exact-version approval,
-project reopening, bounded image uploads, one active render, export disclosure and
-Drive size verification. API behavior is covered by offline regression tests.
-
-Start the existing development environment:
+The CPU pipeline now produces 720p or 1080p H.264/AAC video with slow camera motion,
+burned captions, a downloadable SRT, and an export manifest containing scripture,
+approval and asset provenance. Caption timing is approximate, based on word counts.
 
 ```powershell
+cd D:\SelahFrame
 powershell -ExecutionPolicy Bypass -File .\scripts\start-windows.ps1
 ```
 
-Open http://127.0.0.1:8000. See [Windows setup](docs/INSTALL_WINDOWS.md),
-[current progress and missing features](docs/PROGRESS.md) and [decisions](docs/DECISIONS.md).
+Open http://127.0.0.1:8000. The tools and voice are installed in this checkout.
+For a fresh machine, run setup-windows.ps1 followed by setup-media-windows.ps1.
+See [Windows installation](docs/INSTALL_WINDOWS.md), [API](docs/API.md),
+[progress](docs/PROGRESS.md), and [third-party sources](docs/THIRD_PARTY.md).
 
-Real voice/video export requires FFmpeg, ffprobe, Piper and a reviewed voice model.
-They are not installed or end-to-end tested in this checkpoint. Captions, motion,
-1080p output and durable queued jobs remain pending. Manual narration works without
-Ollama. Drive is optional and requires the user's OAuth authorization.
+Validation: a real 60.52-second 1080x1920 CPU export completed in 24.33 seconds on
+this machine; codecs, duration, pixel format, audio signal and playback range requests
+were checked. Sample frames were visually inspected. These timings are observations,
+not performance guarantees. A listening review of the narration remains a user check.
 
-Run one server process on localhost only. No paid services or cloud rendering.
-Project data is stored beside the app. Use a folder with appropriate privacy and backup settings.
+Saved script versions, job progress, restart recovery, image provenance and immutable
+exports are stored in SQLite. Only one job runs at a time. Interrupted jobs are marked
+failed on restart and can be retried. Local exports work without Ollama or Drive.
 
-Do not commit .env, project data, images, audio, video, voice weights or OAuth files.
-The included MIT license covers project code, not third-party tools/models/assets.
+Ollama remains optional and is not installed in this checkout. Drive uploads require
+rclone and your browser OAuth authorization; no real Drive transfer has been tested.
+Music mixing, scene editing and word alignment remain on the roadmap.
+No public hosting or paid AI service is required. No automatic media cleanup occurs.
+The source code is MIT; tools, models and supplied media retain their own licenses.

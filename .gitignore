@@ -26,3 +26,7 @@ dist/
 *.flac
 .env.*
 !.env.example
+
+# Local downloaded tools and test artifacts
+tools/
+.ruff_cache/

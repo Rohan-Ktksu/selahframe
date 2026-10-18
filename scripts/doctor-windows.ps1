@@ -1,17 +1,13 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
-$missing = 0
-foreach ($tool in @('ffmpeg', 'ffprobe', 'ollama', 'rclone')) {
-    if (Get-Command $tool -ErrorAction SilentlyContinue) { Write-Host "FOUND $tool" }
-    else { Write-Host "MISSING $tool"; $missing++ }
-}
 $python = Join-Path (Get-Location) '.venv\Scripts\python.exe'
-if (Test-Path -LiteralPath $python) {
-    & $python -c "import fastapi, uvicorn, PIL, requests, multipart, dotenv; print('PASS application imports')"
-    if ($LASTEXITCODE -ne 0) { $missing++ }
-    & $python -c "import importlib.util; print('Piper installed:', importlib.util.find_spec('piper') is not None)"
-} else { Write-Host 'MISSING virtual environment; run scripts/setup-windows.ps1'; $missing++ }
-if (!(Test-Path 'voices\en_US-lessac-medium.onnx')) { Write-Host 'MISSING default voice model; see docs/INSTALL_WINDOWS.md'; $missing++ }
-Write-Host 'Install links: https://www.python.org/downloads/windows/ https://ffmpeg.org/download.html https://ollama.com/download/windows https://rclone.org/downloads/'
-Write-Host 'Ollama and Drive are optional for manual-script/local-export use. No credentials are printed.'
-if ($missing -gt 0) { exit 1 }
+if (!(Test-Path -LiteralPath $python)) { Write-Host 'MISSING virtual environment. Run scripts/setup-windows.ps1.'; exit 1 }
+& $python -c "import fastapi, uvicorn, requests, PIL, multipart, dotenv; from app.media import readiness; r=readiness(); [print(('READY ' if v else 'MISSING ') + k) for k,v in r.items()]; raise SystemExit(0 if all(r.values()) else 1)"
+$coreResult = $LASTEXITCODE
+foreach ($tool in @('ollama', 'rclone')) {
+    if (Get-Command $tool -ErrorAction SilentlyContinue) { Write-Host "OPTIONAL FOUND $tool" }
+    else { Write-Host "OPTIONAL NOT INSTALLED $tool" }
+}
+if ($coreResult -ne 0) { Write-Host 'Run scripts/setup-media-windows.ps1. See docs/INSTALL_WINDOWS.md for troubleshooting.' }
+Write-Host 'No credentials or project text are printed. Manual narration and local export do not require Ollama or Drive.'
+exit $coreResult
