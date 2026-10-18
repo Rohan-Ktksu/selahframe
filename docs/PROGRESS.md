@@ -1,3 +1,33 @@
+# Scene editor milestone — 2026-10-18
+
+Active checkout: D:\SelahFrame. All changes remain local for the user's GitHub push.
+
+- Added scene thumbnails, ordering, include/exclude, time weights and camera motion.
+- Normalized scenes table with stable IDs, repeatable backfill and schema version 3.
+- Optimistic revision checks prevent stale saves. Project ownership, active job locks,
+  at least one included scene and bounded finite weights are enforced by the API.
+- Scene changes retain the exact narration approval and require a new render. No-op
+  saves preserve the preview. Excluded images and earlier exports are retained.
+- Renderer now obeys saved order/weights/motion and exports a precise scene timeline.
+  Each scene receives frames while the sum follows the measured narration duration.
+- 39 API/media tests passed (5.672 seconds in the feature run). Ruff and JavaScript
+  syntax passed. Existing approval, persistence, job and upload tests remain green.
+- Browser tested changing weight, zoom-out, excluding a scene, moving a scene, saving
+  and rendering. Reloaded browser showed the persisted settings and live estimates.
+- Real browser-triggered 1080p render: 61.56s, five included scenes. Scene lengths
+  10.280/20.480/10.280/10.280/10.213s verified, including the saved zoom-out choice.
+- Real uploaded-image render: blue then red, 8.400s and 4.185s, completed in 7.45s.
+  Decoded frames confirmed their actual color/order; green was excluded and all three
+  original images remained. Sources/licenses matched the reordered exported images.
+- Repeatable live test: python scripts/smoke-scenes.py (server running).
+- Browser screenshot: ignored temp/scene-editor.png. No generated media enters Git.
+
+Next: licensed optional music/ducking or real Drive OAuth/setup. Ollama, music and
+Drive integration limitations from the previous checkpoint still apply. Caption
+alignment remains approximate, and narration listening review is a user action.
+
+---
+
 # Local video milestone — 2026-10-18
 
 Active development checkout: D:\SelahFrame. The user controls GitHub pushes.

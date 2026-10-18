@@ -2,8 +2,9 @@
 
 - Local video milestone: real 720p/1080p Piper exports, approximate captions,
   camera motion, job progress, immutable export records and image provenance implemented.
-- Next: user listening review, scene ordering/durations and thumbnail management.
-- Then: licensed optional music with ducking; structured local Ollama draft validation.
+- Scene editor: thumbnail previews, ordering, inclusion, relative durations and motion choices implemented.
+- Next: user listening review and optional licensed music with ducking.
+- Then: structured local Ollama draft validation.
 - Drive: install rclone, user OAuth, real upload/check/failure trial; add a reviewed
   archive/cleanup action only after verified upload. Never delete unsynced originals.
 - Release: validate clean Windows installation, full dependency lockfile coverage and

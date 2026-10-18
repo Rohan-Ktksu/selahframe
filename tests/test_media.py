@@ -48,3 +48,20 @@ class MediaTests(unittest.TestCase):
     def test_oversized_word_fails_with_clear_caption_error(self):
         with self.assertRaisesRegex(media.MediaError, "32 characters"):
             media.captions("x" * 33, 2)
+
+    def test_weighted_scene_frames_cover_all_audio_without_zero_length_scenes(self):
+        for frames, weights in [(1500, [1, 2, 1]), (6, [0.25, 10, 1]), (101, [1] * 24)]:
+            counts = media.allocate_scene_frames(frames, weights)
+            self.assertEqual(sum(counts), frames)
+            self.assertTrue(all(count >= 1 for count in counts))
+        counts = media.allocate_scene_frames(1500, [1, 2, 1])
+        self.assertLessEqual(abs(counts[1] - 2 * counts[0]), 2)
+
+    def test_invalid_timing_or_too_many_scenes_reports_actionable_error(self):
+        for frames, weights in [(2, [1, 1, 1]), (50, [0, 1]), (50, [float("nan")]), (50, [])]:
+            with self.assertRaises(media.MediaError):
+                media.allocate_scene_frames(frames, weights)
+
+    def test_unknown_motion_is_rejected(self):
+        with self.assertRaisesRegex(media.MediaError, "motion"):
+            media.scene_filter(720, 1280, 25, "unsafe-filter")

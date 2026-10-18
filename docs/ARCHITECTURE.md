@@ -21,7 +21,19 @@ Uploaded images are decoded and re-encoded before entering the media pipeline.
 Caption cues use word-count-weighted estimates, with an explicit portrait ASS canvas
 for burn-in. SRT is retained for editing. This is not forced or word alignment.
 
-Remaining work: editable scene records/durations, music licensing/mixing, structured
+Remaining work: music licensing/mixing, structured
 model drafts, retry leases/cancellation, thumbnails, backup/verified-cleanup UX,
 and real OAuth integration validation. Public hosting requires a separate security
 and authentication design.
+
+Scene plans live in a normalized scenes table. Existing projects gain stable scene
+IDs on migration (schema version 3), using uploaded asset order or six explicitly
+selected placeholders. The first photo replaces the placeholder plan. Saving a plan
+uses an optimistic image_revision and an immediate transaction; scene positions are
+reassigned atomically under a unique project/position index. Exclusion does not remove
+an asset file. Thumbnail reads check project ownership and path containment.
+The renderer apportions a fixed frame budget by saved weights, giving every included
+scene at least one frame, and records the resulting timeline in export.json. It
+refuses narration too short for the number of included scenes. Selected images and
+licenses follow the saved order into the immutable export; local paths are stripped
+from scene metadata in the portable manifest.

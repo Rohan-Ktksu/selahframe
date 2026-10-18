@@ -29,6 +29,12 @@ failed on restart and can be retried. Local exports work without Ollama or Drive
 
 Ollama remains optional and is not installed in this checkout. Drive uploads require
 rclone and your browser OAuth authorization; no real Drive transfer has been tested.
-Music mixing, scene editing and word alignment remain on the roadmap.
+Music mixing and word alignment remain on the roadmap.
 No public hosting or paid AI service is required. No automatic media cleanup occurs.
 The source code is MIT; tools, models and supplied media retain their own licenses.
+
+Scene editor: thumbnail previews, ordering, inclusion, relative time weights and
+zoom-in/zoom-out/still motion are saved per project. Time weights share the measured
+narration duration; shown seconds are estimates from the last narration. Changing
+scenes preserves script approval and requires a new render. Excluded images remain
+stored locally. The first uploaded image replaces the generated placeholder plan.

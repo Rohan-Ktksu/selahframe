@@ -303,6 +303,148 @@ class AppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertTrue(m.load_project(self.pid)["script"].startswith("Manual text"))
 
+    def scene_plan(self):
+        plan = self.client.get(self.url + "/scenes").json()
+        return {
+            "image_revision": plan["image_revision"],
+            "scenes": [
+                {key: item[key] for key in ("id", "enabled", "duration_weight", "motion_style")}
+                for item in plan["scenes"]
+            ],
+        }
+
+    def upload_scene_image(self, color):
+        data = io.BytesIO()
+        Image.new("RGB", (80, 140), color).save(data, "PNG")
+        response = self.client.post(
+            self.url + "/images",
+            files={"image": ("photo.png", data.getvalue(), "image/png")},
+            data={"source_url": "Owned test image", "license_name": "Owned"},
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_placeholder_scene_plan_and_thumbnails(self):
+        plan = self.client.get(self.url + "/scenes").json()
+        self.assertEqual(len(plan["scenes"]), 6)
+        self.assertTrue(all(item["placeholder"] for item in plan["scenes"]))
+        thumb = self.client.get(plan["scenes"][0]["thumbnail_url"])
+        self.assertEqual(thumb.status_code, 200)
+        self.assertEqual(Image.open(io.BytesIO(thumb.content)).size, (180, 320))
+        self.assertAlmostEqual(sum(s["share"] for s in plan["scenes"]), 1)
+
+    def test_first_photo_replaces_placeholder_plan_and_second_appends(self):
+        first = self.upload_scene_image("red")
+        second = self.upload_scene_image("blue")
+        plan = self.client.get(self.url + "/scenes").json()
+        self.assertEqual(
+            [s["image_asset_id"] for s in plan["scenes"]], [first["asset_id"], second["asset_id"]]
+        )
+        self.assertTrue(all(not s["placeholder"] for s in plan["scenes"]))
+        thumb = self.client.get(plan["scenes"][0]["thumbnail_url"])
+        pixel = Image.open(io.BytesIO(thumb.content)).getpixel((90, 160))
+        self.assertGreater(pixel[0], 200)
+        self.assertLess(pixel[2], 30)
+
+    def test_scene_edits_preserve_approval_and_invalidate_preview(self):
+        self.seed_export()
+        plan = self.scene_plan()
+        plan["scenes"].reverse()
+        plan["scenes"][0].update(duration_weight=3, motion_style="zoom_out")
+        plan["scenes"][-1]["enabled"] = False
+        response = self.client.put(self.url + "/scenes", json=plan)
+        self.assertEqual(response.status_code, 200)
+        project = m.load_project(self.pid)
+        self.assertEqual(project["approved_version"], 1)
+        self.assertEqual(project["image_revision"], 1)
+        self.assertEqual(self.client.get(self.url + "/preview").status_code, 409)
+        saved = response.json()["scenes"]
+        self.assertEqual(saved[0]["id"], plan["scenes"][0]["id"])
+        self.assertAlmostEqual(saved[0]["share"], 3 / 7)
+        m.initialize()
+        self.assertEqual(
+            self.client.get(self.url + "/scenes").json()["scenes"][0]["id"], saved[0]["id"]
+        )
+
+    def test_scene_plan_rejects_stale_or_invalid_updates(self):
+        original = self.scene_plan()
+        updated = self.scene_plan()
+        updated["scenes"][0]["duration_weight"] = 2
+        self.assertEqual(self.client.put(self.url + "/scenes", json=updated).status_code, 200)
+        self.assertEqual(self.client.put(self.url + "/scenes", json=original).status_code, 409)
+        invalid = self.scene_plan()
+        invalid["scenes"][0]["id"] = invalid["scenes"][1]["id"]
+        self.assertEqual(self.client.put(self.url + "/scenes", json=invalid).status_code, 422)
+        invalid = self.scene_plan()
+        for item in invalid["scenes"]:
+            item["enabled"] = False
+        self.assertEqual(self.client.put(self.url + "/scenes", json=invalid).status_code, 422)
+        invalid = self.scene_plan()
+        invalid["scenes"][0]["duration_weight"] = 0
+        self.assertEqual(self.client.put(self.url + "/scenes", json=invalid).status_code, 422)
+        self.assertEqual(self.client.get(self.url + "/scenes").json()["image_revision"], 1)
+
+    def test_scene_ids_cannot_cross_project_boundaries(self):
+        other = self.client.post("/api/projects", json=self.payload).json()["id"]
+        foreign = self.client.get(f"/api/projects/{other}/scenes").json()["scenes"][0]
+        plan = self.scene_plan()
+        plan["scenes"][0]["id"] = foreign["id"]
+        self.assertEqual(self.client.put(self.url + "/scenes", json=plan).status_code, 422)
+        self.assertEqual(
+            self.client.get(self.url + "/scenes/" + foreign["id"] + "/thumbnail").status_code, 404
+        )
+
+    def test_noop_scene_save_keeps_existing_preview(self):
+        self.seed_export()
+        self.assertEqual(
+            self.client.put(self.url + "/scenes", json=self.scene_plan()).status_code, 200
+        )
+        self.assertEqual(m.load_project(self.pid)["image_revision"], 0)
+        self.assertEqual(self.client.get(self.url + "/preview").status_code, 200)
+
+    def test_busy_project_blocks_scene_changes_and_snapshot_is_immutable(self):
+        self.approve()
+        plan = self.scene_plan()
+        plan["scenes"].reverse()
+        plan["scenes"][0]["duration_weight"] = 4
+        plan["scenes"][1]["enabled"] = False
+        self.client.put(self.url + "/scenes", json=plan)
+        with patch.object(m, "start_worker"):
+            job_id = self.client.post(self.url + "/render").json()["job_id"]
+        pending = self.scene_plan()
+        pending["scenes"][0]["duration_weight"] = 1
+        self.assertEqual(self.client.put(self.url + "/scenes", json=pending).status_code, 409)
+        with m.connection() as c:
+            import json
+
+            snapshot = json.loads(
+                c.execute("SELECT snapshot_json FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
+            )
+        self.assertEqual(len(snapshot["scenes"]), 5)
+        self.assertEqual(snapshot["scenes"][0]["id"], plan["scenes"][0]["id"])
+        self.assertEqual(snapshot["scenes"][0]["duration_weight"], 4)
+
+    def test_thumbnail_rejects_path_outside_project(self):
+        asset = self.upload_scene_image("red")
+        with m.connection() as c:
+            c.execute(
+                "UPDATE assets SET local_path=? WHERE id=?",
+                (str(Path(self.tmp.name) / "outside.jpg"), asset["asset_id"]),
+            )
+        url = self.client.get(self.url + "/scenes").json()["scenes"][0]["thumbnail_url"]
+        self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_scene_migration_preserves_images_and_is_repeatable(self):
+        asset = self.upload_scene_image("green")
+        with m.connection() as c:
+            c.execute("DELETE FROM scenes WHERE project_id=?", (self.pid,))
+        m.initialize()
+        first = self.client.get(self.url + "/scenes").json()["scenes"]
+        m.initialize()
+        second = self.client.get(self.url + "/scenes").json()["scenes"]
+        self.assertEqual(first, second)
+        self.assertEqual(first[0]["image_asset_id"], asset["asset_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,12 @@ main{max-width:820px;margin:30px auto;padding:24px}h1{margin-bottom:5px}
 section{background:#1c2a3d;border:1px solid #33455a;padding:20px;margin-top:18px;border-radius:12px}
 input,textarea{box-sizing:border-box;width:100%;padding:12px;border-radius:6px;border:1px solid #718096;background:#0d1826;color:#fff;margin:7px 0 14px}
 textarea{min-height:130px}button{background:#e8b76c;color:#1e2531;border:0;border-radius:7px;padding:11px 15px;margin:6px 5px 6px 0;cursor:pointer;font-weight:650}
+fieldset{border:0;padding:0;margin:0;min-width:0}select{padding:9px;border-radius:6px;max-width:100%}
+.scene-card{display:grid;grid-template-columns:100px minmax(0,1fr);gap:16px;border-top:1px solid #3c4d61;padding:18px 0}
+.scene-card img{width:100px;height:178px;object-fit:cover;border-radius:8px}.scene-card h3{margin:0 0 10px}.scene-card p{margin:5px 0;overflow-wrap:anywhere}
+.scene-card input[type=number]{max-width:90px;display:inline-block;margin:5px 10px}.scene-card input[type=checkbox]{width:auto;margin:0 7px 0 0}
+.scene-card button{padding:8px 10px}.scene-card label{display:block;margin:6px 0}.scene-note{color:#e8b76c}
+@media(max-width:500px){main{padding:12px}.scene-card{grid-template-columns:80px minmax(0,1fr);gap:10px}.scene-card img{width:80px;height:142px}}
 button:disabled{opacity:.35;cursor:not-allowed}a{color:#ffe0a5}small{color:#acb9c7}pre{white-space:pre-wrap;overflow-wrap:anywhere}
 </style></head><body><main>
 <h1>✦ SelahFrame</h1><p id="readiness">Checking local video tools…</p><small>Local scripture video studio • scripts need human review</small>
@@ -27,7 +33,14 @@ button:disabled{opacity:.35;cursor:not-allowed}a{color:#ffe0a5}small{color:#acb9
 <button onclick="draft()">Generate draft using Ollama</button>
 <label>Editable narration</label><textarea id="narration"></textarea>
 <button onclick="save()">Save edits</button><button onclick="approve()">Approve script</button>
-</section><section><h2>3 · Build and archive video</h2>
+</section>
+<section id="sceneEditor"><h2>3 · Arrange scenes</h2>
+<p><small>Include the scenes you want, then move them up or down. A time weight of 2 gives a scene roughly twice as much screen time as 1. All included scenes share the narration's full length.</small></p>
+<p id="sceneNotice" class="scene-note" aria-live="polite">Open a project to edit its scenes.</p>
+<fieldset id="sceneControls"><div id="sceneList"></div>
+<button id="saveScenes" onclick="saveScenePlan()">Save scene plan</button>
+<button onclick="reloadScenePlan()">Reload saved scenes</button></fieldset></section>
+<section><h2>4 · Build and archive video</h2>
 <small>Upload JPG / PNG scenes you have rights to use, or explicitly select the abstract placeholder pack when creating the project.
 The MVP makes image slides with narration (no fully animated scene generation yet).</small>
 <label>Image source or ownership</label><input id="image_source" placeholder="Source URL or your own photograph"><label>Image license / permission</label><input id="image_license" placeholder="Your ownership or applicable license"><p><input id="image" type="file" accept="image/*"><button onclick="uploadImage()">Add image</button></p>
@@ -39,6 +52,7 @@ The MVP makes image slides with narration (no fully animated scene generation ye
 <script>
 const base='/api/projects';
 let scriptVersion=null;
+let sceneProject=null,sceneRevision=null,sceneItems=[],sceneDirty=false,sceneNarrationMs=null,sceneBusy=false,sceneLastJob=null;
 const value=id=>document.getElementById(id).value;
 const pid=()=>encodeURIComponent(value('pid').trim());
 async function req(path,method='GET',data=null,form=false){
@@ -51,12 +65,49 @@ async function create(){action(async()=>{let data=Object.fromEntries(['title','r
 async function draft(){action(async()=>{let p=await req(`${base}/${pid()}/generate-script`,'POST');document.getElementById('narration').value=p.script;scriptVersion=p.script_version;await refresh();})}
 async function save(){action(async()=>{let p=await req(`${base}/${pid()}/script`,'PUT',{script:value('narration')});scriptVersion=p.script_version;await refresh()})}
 async function approve(){action(async()=>{let p=await req(`${base}/${pid()}`);if(p.script!==value('narration'))throw Error('Save your edits before approval');await req(`${base}/${pid()}/approve`,'POST',{script_version:scriptVersion});await refresh()})}
-async function reopen(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('narration').value=p.script;['title','reference','scripture','translation','scripture_source','source_license','context_text'].forEach(k=>document.getElementById(k).value=p[k]);document.getElementById('placeholders').checked=!!p.placeholders;scriptVersion=p.script_version;await refresh()})}
+async function reopen(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('narration').value=p.script;['title','reference','scripture','translation','scripture_source','source_license','context_text'].forEach(k=>document.getElementById(k).value=p[k]);document.getElementById('placeholders').checked=!!p.placeholders;scriptVersion=p.script_version;await loadScenePlan();await refresh()})}
 async function listProjects(){action(async()=>{let rows=await req(base);let box=document.getElementById('projects');box.replaceChildren();rows.forEach(p=>{let b=document.createElement('button');b.textContent=p.title+' · '+p.status;b.onclick=()=>{document.getElementById('pid').value=p.id;reopen()};box.appendChild(b)})})}
-async function uploadImage(){action(async()=>{let f=document.getElementById('image').files[0];if(!f)throw Error('Choose an image');let fd=new FormData();fd.append('image',f);if(!value('image_source').trim()||!value('image_license').trim())throw Error('Record the image source and license before uploading');fd.append('source_url',value('image_source'));fd.append('license_name',value('image_license'));await req(`${base}/${pid()}/images`,'POST',fd,true);await refresh();})}
-async function render(){action(async()=>{await req(`${base}/${pid()}/render`,'POST',{quality:value('quality')});await refresh()})}
+async function uploadImage(){action(async()=>{if(sceneDirty)throw Error('Save or reload your scene edits before adding an image');let f=document.getElementById('image').files[0];if(!f)throw Error('Choose an image');let fd=new FormData();fd.append('image',f);if(!value('image_source').trim()||!value('image_license').trim())throw Error('Record the image source and license before uploading');fd.append('source_url',value('image_source'));fd.append('license_name',value('image_license'));await req(`${base}/${pid()}/images`,'POST',fd,true);await loadScenePlan();await refresh();})}
+async function render(){action(async()=>{if(sceneDirty)throw Error('Save the scene plan before rendering');let saved=await req(`${base}/${pid()}`);if(saved.script!==value('narration'))throw Error('Save and approve your narration edits before rendering');await req(`${base}/${pid()}/render`,'POST',{quality:value('quality')});await refresh()})}
 async function drive(){action(async()=>{await req(`${base}/${pid()}/upload-drive`,'POST');await refresh()})}
-async function refresh(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('status').textContent=JSON.stringify({status:p.status,drive_status:p.drive_status,error:p.error,id:p.id,image_count:p.image_count,script_version:p.script_version,approved_version:p.approved_version,job:p.job},null,2);document.getElementById('progress').value=p.job?.progress||0;document.getElementById('stage').textContent=p.job?`${p.job.stage} · ${p.job.progress}% · ${p.job.status}`:p.status;let a=document.getElementById('download'),v=document.getElementById('preview');v.hidden=p.status!=='complete';a.textContent='';if(p.status==='complete'){a.href=`${base}/${pid()}/download`;a.textContent='Download final video';let src=`${base}/${pid()}/preview?v=${p.job?.id||p.script_version}`;if(v.getAttribute('src')!==src)v.src=src;}})}
+async function refresh(){return action(async()=>{let p=await req(`${base}/${pid()}`);if(sceneProject===p.id&&!sceneDirty&&(p.image_revision!==sceneRevision||(p.status==='complete'&&p.job?.id&&p.job.id!==sceneLastJob))){sceneLastJob=p.job?.id;await loadScenePlan();}document.getElementById('status').textContent=JSON.stringify({status:p.status,drive_status:p.drive_status,error:p.error,id:p.id,image_count:p.image_count,script_version:p.script_version,approved_version:p.approved_version,job:p.job},null,2);sceneBusy=['rendering','uploading'].includes(p.status);document.getElementById('sceneControls').disabled=sceneBusy;document.getElementById('progress').value=p.job?.progress||0;document.getElementById('stage').textContent=p.job?`${p.job.stage} · ${p.job.progress}% · ${p.job.status}`:p.status;let a=document.getElementById('download'),v=document.getElementById('preview');v.hidden=p.status!=='complete';a.textContent='';if(p.status==='complete'){a.href=`${base}/${pid()}/download`;a.textContent='Download final video';let src=`${base}/${pid()}/preview?v=${p.job?.id||p.script_version}`;if(v.getAttribute('src')!==src)v.src=src;}})}
+function sceneDraftChanged(){sceneDirty=true;updateSceneShares();document.getElementById('sceneNotice').textContent='Unsaved scene changes. Save the plan before rendering.';}
+function updateSceneShares(){
+ const total=sceneItems.filter(s=>s.enabled).reduce((n,s)=>n+Number(s.duration_weight||0),0);
+ document.querySelectorAll('[data-scene-share]').forEach(el=>{const s=sceneItems.find(s=>s.id===el.dataset.sceneShare);const share=s.enabled&&total?Number(s.duration_weight)/total:0;el.textContent=!s.enabled?'Excluded from the next render':`${(share*100).toFixed(1)}% of narration${sceneNarrationMs?` · about ${(sceneNarrationMs*share/1000).toFixed(1)}s using the last narration`:''}`;});
+}
+function drawSceneCards(){
+ const box=document.getElementById('sceneList');box.replaceChildren();
+ if(!sceneItems.length){const p=document.createElement('p');p.textContent='Upload an image to start a scene plan. The placeholder pack is available when explicitly selected at project creation.';box.appendChild(p);}
+ sceneItems.forEach((scene,index)=>{
+  const card=document.createElement('div');card.className='scene-card';
+  const image=document.createElement('img');image.src=scene.thumbnail_url;image.alt=scene.placeholder?'Abstract placeholder scene':`Uploaded scene ${index+1}`;image.loading='lazy';card.appendChild(image);
+  const body=document.createElement('div');const title=document.createElement('h3');title.textContent=`Scene ${index+1}${scene.placeholder?' · placeholder':''}`;body.appendChild(title);
+  const includeLabel=document.createElement('label'),include=document.createElement('input');include.type='checkbox';include.checked=scene.enabled;include.setAttribute('aria-label',`Include scene ${index+1}`);include.onchange=()=>{scene.enabled=include.checked;sceneDraftChanged()};includeLabel.append(include,' Include in video');body.appendChild(includeLabel);
+  const weightLabel=document.createElement('label'),weight=document.createElement('input');weight.type='number';weight.min='0.25';weight.max='10';weight.step='0.25';weight.value=scene.duration_weight;weight.setAttribute('aria-label',`Scene ${index+1} time weight`);weight.oninput=()=>{scene.duration_weight=weight.value;sceneDraftChanged()};weightLabel.append('Time weight ',weight);body.appendChild(weightLabel);
+  const motionLabel=document.createElement('label'),motion=document.createElement('select');motion.setAttribute('aria-label',`Scene ${index+1} motion`);[['zoom_in','Slow zoom in'],['zoom_out','Slow zoom out'],['still','Still image']].forEach(([v,t])=>{const option=document.createElement('option');option.value=v;option.textContent=t;motion.appendChild(option)});motion.value=scene.motion_style;motion.onchange=()=>{scene.motion_style=motion.value;sceneDraftChanged()};motionLabel.append('Camera motion ',motion);body.appendChild(motionLabel);
+  const share=document.createElement('p');share.dataset.sceneShare=scene.id;body.appendChild(share);
+  const rights=document.createElement('small');rights.textContent=`Source: ${scene.source_url} · Rights: ${scene.license_name}`;const rightsLine=document.createElement('p');rightsLine.appendChild(rights);body.appendChild(rightsLine);
+  [['Move up',-1],['Move down',1]].forEach(([label,direction])=>{const button=document.createElement('button');button.type='button';button.textContent=label;button.disabled=index+direction<0||index+direction>=sceneItems.length;button.onclick=()=>{[sceneItems[index],sceneItems[index+direction]]=[sceneItems[index+direction],sceneItems[index]];drawSceneCards();sceneDraftChanged()};body.appendChild(button)});
+  card.appendChild(body);box.appendChild(card);
+ });
+ updateSceneShares();document.getElementById('sceneControls').disabled=sceneBusy;
+ document.getElementById('saveScenes').disabled=!sceneItems.length;
+}
+async function loadScenePlan(){
+ const project=value('pid').trim();if(!project)return;
+ const plan=await req(`${base}/${encodeURIComponent(project)}/scenes`);if(value('pid').trim()!==project)return;
+ sceneProject=project;sceneRevision=plan.image_revision;sceneItems=plan.scenes;sceneNarrationMs=plan.narration_duration_ms;sceneDirty=false;drawSceneCards();
+ document.getElementById('sceneNotice').textContent=sceneItems.length?'Scene plan loaded. Timing is estimated from the last narration when available.':'No scenes yet.';
+}
+async function reloadScenePlan(){return action(loadScenePlan)}
+async function saveScenePlan(){return action(async()=>{
+ if(sceneProject!==value('pid').trim())throw Error('Reopen the project before editing scenes');
+ const scenes=sceneItems.map(s=>({id:s.id,enabled:s.enabled,duration_weight:Number(s.duration_weight),motion_style:s.motion_style}));
+ if(scenes.some(s=>!Number.isFinite(s.duration_weight)||s.duration_weight<0.25||s.duration_weight>10))throw Error('Each time weight must be between 0.25 and 10');
+ if(!scenes.some(s=>s.enabled))throw Error('Include at least one scene');
+ await req(`${base}/${pid()}/scenes`,'PUT',{image_revision:sceneRevision,scenes});await loadScenePlan();await refresh();document.getElementById('sceneNotice').textContent='Scene plan saved. Render to apply any changes.';
+})}
 setInterval(()=>{if(value('pid'))refresh()},3000);
 req('/api/health').then(h=>{let missing=Object.entries(h.components).filter(([k,v])=>['ffmpeg','ffprobe','piper','voice_model'].includes(k)&&!v).map(([k])=>k);document.getElementById('readiness').textContent=missing.length?'Video setup needed: '+missing.join(', '):'Local voice and video tools ready · CPU rendering';}).catch(()=>{});
 listProjects();

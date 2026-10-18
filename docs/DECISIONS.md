@@ -34,3 +34,15 @@
 - Preserve generated exports and original image assets. Limit retained scratch plus
   the active export with MAX_RENDER_DISK_GB; refuse work instead of deleting files.
 - Ruff is a developer-only MIT dependency; CI checks syntax/unused imports and format.
+
+## Scene editor
+
+- Use time weights, not forced fixed seconds, so narration is never truncated to fit
+  scene timings. Show percentages and estimated seconds using the last narration.
+- Store selected order, inclusion and motion in SQLite; snapshot them for each render.
+  Scene edits retain narration approval and invalidate exports through image_revision.
+- Disable/exclude scenes without deleting original assets. Restore by including again.
+- Backfill legacy projects without duplicating scene IDs. The first photo upload
+  replaces abstract placeholders, matching the previous renderer's selection behavior.
+- Keep thumbnails local, ownership-checked and under the project directory. No URLs
+  supplied by users are fetched to generate them. Metadata stays text, never HTML.

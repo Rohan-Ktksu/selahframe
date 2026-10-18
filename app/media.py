@@ -234,6 +234,39 @@ def write_ass(path, text, duration, width, height):
     path.write_text(header + "".join(rows), encoding="utf-8")
 
 
+def allocate_scene_frames(total_frames, weights):
+    """Keep every included scene visible and distribute all remaining frames by weight."""
+    if not weights or total_frames < len(weights):
+        raise MediaError("Narration is too short for the included scenes. Include fewer scenes.")
+    if any(not math.isfinite(w) or w <= 0 for w in weights):
+        raise MediaError("Each included scene needs a finite, positive time weight.")
+    remainder = total_frames - len(weights)
+    total = math.fsum(weights)
+    quotas = [remainder * weight / total for weight in weights]
+    counts = [1 + math.floor(quota) for quota in quotas]
+    spare = total_frames - sum(counts)
+    order = sorted(range(len(weights)), key=lambda idx: (-(quotas[idx] % 1), idx))
+    for idx in order[:spare]:
+        counts[idx] += 1
+    return counts
+
+
+def scene_filter(width, height, count, motion):
+    denominator = max(count - 1, 1)
+    zooms = {
+        "zoom_in": f"1+0.06*on/{denominator}",
+        "zoom_out": f"1.06-0.06*on/{denominator}",
+        "still": "1",
+    }
+    if motion not in zooms:
+        raise MediaError("Unknown scene motion. Save the scene plan again.")
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=increase:out_range=tv,crop={width}:{height},"
+        f"zoompan=z='{zooms[motion]}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
+        f"d={count}:s={width}x{height}:fps=25,format=yuv420p,setparams=range=limited"
+    )
+
+
 def render(snapshot, images, export_folder, scratch, progress):
     missing = [key for key, available in readiness().items() if not available]
     if missing:
@@ -256,36 +289,68 @@ def render(snapshot, images, export_folder, scratch, progress):
         raise MediaError(
             "Narration must be between 0.2 and 180 seconds. Shorten the script and approve again."
         )
-    if not images:
-        if not snapshot["placeholders"]:
+    scenes = snapshot.get("scenes")
+    if scenes is None:
+        # Compatibility for direct callers without a persisted scene plan.
+        if images:
+            originals = images
+        elif snapshot["placeholders"]:
+            originals = placeholder_pack(scratch / "placeholders")
+        else:
             raise MediaError("Upload licensed images or explicitly choose placeholders.")
-        images = placeholder_pack(export_folder / "images")
+        scenes = [
+            {"id": None, "image_asset_id": None, "duration_weight": 1, "motion_style": "zoom_in"}
+            for _ in originals
+        ]
     else:
-        destination = export_folder / "images"
-        destination.mkdir()
-        copies = []
-        for idx, image in enumerate(images):
-            copy = destination / f"scene_{idx + 1:02}.jpg"
-            shutil.copyfile(image, copy)
-            copies.append(copy)
-        images = copies
+        if not scenes:
+            raise MediaError("Keep at least one scene included in the video.")
+        needs_placeholders = any(not scene["image_asset_id"] for scene in scenes)
+        if needs_placeholders and not snapshot["placeholders"]:
+            raise MediaError("The placeholder pack was not selected for this project.")
+        pack = placeholder_pack(scratch / "placeholders") if needs_placeholders else []
+        originals = []
+        for scene in scenes:
+            if scene["image_asset_id"]:
+                originals.append(Path(scene["local_path"]))
+            else:
+                index = scene.get("placeholder_index")
+                if index not in range(6):
+                    raise MediaError("Invalid placeholder scene. Reload your scene plan.")
+                originals.append(pack[index])
+    destination = export_folder / "images"
+    destination.mkdir(exist_ok=True)
+    images = []
+    for idx, original in enumerate(originals):
+        copy = destination / f"scene_{idx + 1:02}.jpg"
+        shutil.copyfile(original, copy)
+        images.append(copy)
+    disk_guard(scratch.parent, extra_folder=export_folder)
     write_srt(export_folder / "captions.srt", snapshot["script"], duration)
     write_ass(export_folder / "captions.ass", snapshot["script"], duration, width, height)
     frames = math.ceil(duration * 25)
     clips = []
+    frame_counts = allocate_scene_frames(frames, [scene["duration_weight"] for scene in scenes])
+    timeline = []
+    elapsed_frames = 0
     for idx, image in enumerate(images):
         progress("scenes", 20 + round(50 * idx / len(images)))
-        count = (frames * (idx + 1) // len(images)) - (frames * idx // len(images))
-        if count <= 0:
-            continue
+        count = frame_counts[idx]
+        timeline.append(
+            {
+                "scene_id": scenes[idx]["id"],
+                "image_asset_id": scenes[idx]["image_asset_id"],
+                "file": "images/" + image.name,
+                "motion_style": scenes[idx]["motion_style"],
+                "duration_weight": scenes[idx]["duration_weight"],
+                "start_ms": round(elapsed_frames * 1000 / 25),
+                "end_ms": min(round((elapsed_frames + count) * 1000 / 25), round(duration * 1000)),
+            }
+        )
+        elapsed_frames += count
         clip = scratch / f"clip_{idx:02}.mp4"
         remaining = disk_guard(scratch.parent, extra_folder=export_folder)
-        # One source frame -> count frames of slow, centered camera motion.
-        vf = (
-            f"scale={width}:{height}:force_original_aspect_ratio=increase:out_range=tv,crop={width}:{height},"
-            f"zoompan=z='1+0.06*on/{max(count - 1, 1)}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
-            f"d={count}:s={width}x{height}:fps=25,format=yuv420p,setparams=range=limited"
-        )
+        vf = scene_filter(width, height, count, scenes[idx]["motion_style"])
         run(
             [
                 executable("ffmpeg"),
@@ -402,4 +467,5 @@ def render(snapshot, images, export_folder, scratch, progress):
         "sha256": digest(final),
         "caption_timing": "approximate word-count-weighted",
         "voice": voice_model().name,
+        "scene_timeline": timeline,
     }

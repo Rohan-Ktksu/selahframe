@@ -33,8 +33,12 @@ See THIRD_PARTY.md. Existing custom environment settings are preserved.
    12 MB by default, 20 million pixels, and 24 uploaded images per project.
 3. Write narration manually, save and approve the saved version. Editing revokes
    approval. Aim for roughly 110-135 words; output duration follows the actual voice.
-4. Select 720p for faster drafts or 1080p for a full-HD export. Watch the job stages.
-5. Watch/download the MP4. Review narration, interpretation, picture rights and
+4. Arrange scenes using the thumbnail editor. Move scenes up/down, include/exclude
+   them, set time weights and choose zoom in, zoom out or still. A weight of 2 gets
+   roughly twice the screen time of 1. Save the plan. Seconds shown use the last
+   narration as an estimate; the actual render follows the new narration duration.
+5. Select 720p for faster drafts or 1080p for a full-HD export. Watch the job stages.
+6. Watch/download the MP4. Review narration, interpretation, picture rights and
    approximate caption timing before distribution. Voice narration is AI-generated.
 
 The app stores data/projects.sqlite3, output/PROJECT/exports/JOB and temp/JOB.
@@ -83,3 +87,17 @@ Google authorization and a real Drive transfer remain untested on this machine.
 - Interrupted job: restart, review the displayed error and explicitly retry.
 - Already running: use the existing server or stop it before starting another.
 - External host/origin rejected: open the exact localhost URL on port 8000.
+
+## Scene-editor regression
+
+With the server running, execute:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke-scenes.py
+```
+
+This creates labeled geometric test cards, uploads them with provenance, reorders
+blue before red, gives blue twice the time, excludes green, renders and decodes frames
+to check their actual color/order. It verifies that excluded originals remain intact.
+The technical test narration is explicitly approved by this developer script.
+It never approves user drafts or uploads anything to an external service.

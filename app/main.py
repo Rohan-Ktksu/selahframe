@@ -16,7 +16,7 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -64,7 +64,7 @@ async def lifespan(application):
         handle.close()
 
 
-app = FastAPI(title="SelahFrame", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="SelahFrame", version="0.3.0", lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
 
@@ -153,7 +153,18 @@ def initialize():
         export_columns = {r[1] for r in c.execute("PRAGMA table_info(exports)")}
         if "pipeline_signature" not in export_columns:
             c.execute("ALTER TABLE exports ADD COLUMN pipeline_signature TEXT NOT NULL DEFAULT ''")
-        c.execute("PRAGMA user_version=2")
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS scenes (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                idx INTEGER NOT NULL, image_asset_id TEXT REFERENCES assets(id),
+                placeholder_index INTEGER, duration_weight REAL NOT NULL DEFAULT 1,
+                motion_style TEXT NOT NULL DEFAULT 'zoom_in', enabled INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(project_id, idx));
+            CREATE INDEX IF NOT EXISTS scenes_project_idx ON scenes(project_id, idx);
+        """)
+        for row in c.execute("SELECT id, placeholders FROM projects").fetchall():
+            ensure_scenes(c, row["id"], bool(row["placeholders"]))
+        c.execute("PRAGMA user_version=3")
         c.execute("UPDATE projects SET script_version=1 WHERE script_version=0 AND script<>''")
         c.execute(
             "INSERT OR IGNORE INTO scripts (id, project_id, version, narration_text, approved_at) SELECT id, id, script_version, script, CASE WHEN approved_version=script_version THEN CURRENT_TIMESTAMP ELSE NULL END FROM projects WHERE script<>''"
@@ -167,6 +178,57 @@ def initialize():
         c.execute(
             "UPDATE projects SET status='failed', error='App stopped during render. Retry the approved script.' WHERE status='rendering'"
         )
+
+
+def ensure_scenes(c, pid, placeholders):
+    if c.execute("SELECT 1 FROM scenes WHERE project_id=?", (pid,)).fetchone():
+        return
+    images = c.execute(
+        "SELECT id FROM assets WHERE project_id=? AND type='image' ORDER BY rowid", (pid,)
+    ).fetchall()
+    if images:
+        rows = [
+            (str(uuid.uuid4()), pid, idx, image["id"], None) for idx, image in enumerate(images)
+        ]
+    elif placeholders:
+        rows = [(str(uuid.uuid4()), pid, idx, None, idx) for idx in range(6)]
+    else:
+        rows = []
+    c.executemany(
+        "INSERT INTO scenes (id, project_id, idx, image_asset_id, placeholder_index) VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
+
+
+def scene_rows(c, pid):
+    return [
+        dict(row)
+        for row in c.execute(
+            "SELECT s.*, a.local_path, a.source_url, a.license_name, a.checksum FROM scenes s LEFT JOIN assets a ON a.id=s.image_asset_id WHERE s.project_id=? ORDER BY s.idx",
+            (pid,),
+        )
+    ]
+
+
+def mark_visual_edit(c, pid):
+    c.execute(
+        "UPDATE projects SET image_revision=image_revision+1, status=CASE WHEN approved_version=script_version THEN 'approved' ELSE 'review' END, drive_status='', error='' WHERE id=?",
+        (pid,),
+    )
+
+
+class SceneEdit(BaseModel):
+    model_config = {"extra": "forbid"}
+    id: str = Field(min_length=1, max_length=36)
+    enabled: bool = True
+    duration_weight: float = Field(ge=0.25, le=10, allow_inf_nan=False)
+    motion_style: Literal["zoom_in", "zoom_out", "still"] = "zoom_in"
+
+
+class ScenePlan(BaseModel):
+    model_config = {"extra": "forbid"}
+    image_revision: int = Field(ge=0)
+    scenes: list[SceneEdit] = Field(min_length=1, max_length=24)
 
 
 class NewProject(BaseModel):
@@ -262,6 +324,7 @@ def create_project(payload: NewProject):
                 payload.placeholders,
             ),
         )
+        ensure_scenes(c, pid, payload.placeholders)
     (OUTPUT / pid / "images").mkdir(parents=True, exist_ok=True)
     return load_project(pid)
 
@@ -415,10 +478,11 @@ async def upload_image(
         if state in {"rendering", "uploading"} or count >= 24:
             path.unlink(missing_ok=True)
             raise HTTPException(409, "Project is busy or has reached the 24-image limit")
+        asset_id = str(uuid.uuid4())
         c.execute(
             "INSERT INTO assets (id, project_id, type, local_path, source_url, license_name, checksum) VALUES (?, ?, 'image', ?, ?, ?, ?)",
             (
-                str(uuid.uuid4()),
+                asset_id,
                 pid,
                 str(path),
                 source_url,
@@ -426,11 +490,135 @@ async def upload_image(
                 media.digest(path),
             ),
         )
+        # The first photo replaces the generated pack; original files/exports are retained.
+        if not c.execute(
+            "SELECT 1 FROM scenes WHERE project_id=? AND image_asset_id IS NOT NULL", (pid,)
+        ).fetchone():
+            c.execute("DELETE FROM scenes WHERE project_id=?", (pid,))
+        idx = c.execute(
+            "SELECT COALESCE(MAX(idx), -1)+1 FROM scenes WHERE project_id=?", (pid,)
+        ).fetchone()[0]
         c.execute(
-            "UPDATE projects SET image_revision=image_revision+1, status=CASE WHEN approved_version=script_version THEN 'approved' ELSE status END, drive_status='' WHERE id=?",
-            (pid,),
+            "INSERT INTO scenes (id, project_id, idx, image_asset_id) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), pid, idx, asset_id),
         )
-    return {"filename": path.name, "count": count + 1}
+        mark_visual_edit(c, pid)
+    return {"filename": path.name, "count": count + 1, "asset_id": asset_id}
+
+
+@app.get("/api/projects/{pid}/scenes")
+def get_scenes(pid: str):
+    project = load_project(pid)
+    with connection() as c:
+        rows = scene_rows(c, pid)
+        previous = c.execute(
+            "SELECT duration_ms FROM exports WHERE project_id=? ORDER BY rowid DESC LIMIT 1", (pid,)
+        ).fetchone()
+    duration = previous[0] if previous else None
+    total = sum(row["duration_weight"] for row in rows if row["enabled"])
+    scenes = []
+    for row in rows:
+        share = row["duration_weight"] / total if row["enabled"] and total else 0
+        scenes.append(
+            {
+                "id": row["id"],
+                "image_asset_id": row["image_asset_id"],
+                "enabled": bool(row["enabled"]),
+                "duration_weight": row["duration_weight"],
+                "motion_style": row["motion_style"],
+                "placeholder": row["image_asset_id"] is None,
+                "share": share,
+                "estimated_seconds": round(duration * share / 1000, 2) if duration else None,
+                "source_url": row["source_url"] or "SelahFrame abstract placeholder pack",
+                "license_name": row["license_name"] or "Project-generated geometric illustration",
+                "thumbnail_url": f"/api/v1/projects/{pid}/scenes/{row['id']}/thumbnail",
+            }
+        )
+    return {
+        "image_revision": project["image_revision"],
+        "narration_duration_ms": duration,
+        "scenes": scenes,
+    }
+
+
+@app.put("/api/projects/{pid}/scenes")
+def save_scenes(pid: str, payload: ScenePlan):
+    load_project(pid)
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        project = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if project["status"] in {"rendering", "uploading"}:
+            raise HTTPException(409, "Wait for the active job before editing scenes")
+        if payload.image_revision != project["image_revision"]:
+            raise HTTPException(
+                409, "The scene plan changed. Reload the saved scenes and try again."
+            )
+        rows = scene_rows(c, pid)
+        ids = [item.id for item in payload.scenes]
+        if len(ids) != len(set(ids)) or set(ids) != {row["id"] for row in rows}:
+            raise HTTPException(
+                422, "Include every scene exactly once; images must belong to this project"
+            )
+        if not any(item.enabled for item in payload.scenes):
+            raise HTTPException(422, "Keep at least one scene included in the video")
+        current = [
+            (r["id"], bool(r["enabled"]), r["duration_weight"], r["motion_style"]) for r in rows
+        ]
+        revised = [(r.id, r.enabled, r.duration_weight, r.motion_style) for r in payload.scenes]
+        if current != revised:
+            # Temporarily use negative positions to avoid UNIQUE collisions during reorder.
+            c.execute("UPDATE scenes SET idx=-(idx+1) WHERE project_id=?", (pid,))
+            for idx, item in enumerate(payload.scenes):
+                c.execute(
+                    "UPDATE scenes SET idx=?, enabled=?, duration_weight=?, motion_style=? WHERE project_id=? AND id=?",
+                    (idx, item.enabled, item.duration_weight, item.motion_style, pid, item.id),
+                )
+            mark_visual_edit(c, pid)
+    return get_scenes(pid)
+
+
+_thumbnail_lock = threading.Lock()
+
+
+@app.get("/api/projects/{pid}/scenes/{scene_id}/thumbnail")
+def scene_thumbnail(pid: str, scene_id: str):
+    load_project(pid)
+    with connection() as c:
+        row = c.execute(
+            "SELECT s.*, a.local_path, a.checksum FROM scenes s LEFT JOIN assets a ON a.id=s.image_asset_id WHERE s.project_id=? AND s.id=?",
+            (pid, scene_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Scene not found")
+    folder = OUTPUT / pid
+    with _thumbnail_lock:
+        if row["image_asset_id"]:
+            original = Path(row["local_path"]).resolve()
+            try:
+                original.relative_to((folder / "images").resolve())
+            except ValueError:
+                raise HTTPException(404, "Invalid image path")
+            key = row["checksum"]
+        else:
+            if row["placeholder_index"] not in range(6):
+                raise HTTPException(404, "Invalid placeholder")
+            pack_folder = folder / "placeholders"
+            original = pack_folder / f"placeholder_{row['placeholder_index'] + 1:02}.jpg"
+            if not original.is_file():
+                media.placeholder_pack(pack_folder)
+            key = "placeholder-v1-" + str(row["placeholder_index"])
+        thumbnail = folder / "thumbnails" / (key + ".jpg")
+        if not thumbnail.is_file():
+            thumbnail.parent.mkdir(exist_ok=True)
+            try:
+                with Image.open(original) as image:
+                    image = ImageOps.fit(image.convert("RGB"), (180, 320))
+                    temporary = thumbnail.with_suffix(".tmp")
+                    image.save(temporary, "JPEG", quality=85)
+                    temporary.replace(thumbnail)
+            except (OSError, ValueError):
+                raise HTTPException(404, "Image is missing or unreadable. Upload it again.")
+    return FileResponse(thumbnail, media_type="image/jpeg")
 
 
 def run(cmd, timeout=600, input_text=None):
@@ -484,8 +672,8 @@ def render_worker(pid: str, job_id: str):
         provenance = []
         for idx, path in enumerate(sorted((folder / "images").glob("*.jpg"))):
             source = (
-                snapshot["images"][idx]
-                if image_paths
+                snapshot["scenes"][idx]
+                if snapshot["scenes"][idx]["image_asset_id"]
                 else {
                     "source_url": "SelahFrame abstract placeholder pack",
                     "license_name": "Project-generated geometric illustration; no third-party image",
@@ -510,7 +698,23 @@ def render_worker(pid: str, job_id: str):
             "voice_license": "MIT model repository; public-domain LJ Speech dataset"
             if info["voice"].startswith("en_US-ljspeech-")
             else os.getenv("PIPER_LICENSE", "User must verify"),
-            "placeholder_pack_used": not bool(image_paths),
+            "placeholder_pack_used": any(
+                not scene["image_asset_id"] for scene in snapshot["scenes"]
+            ),
+            "file_path": "final.mp4",
+            "scenes": [
+                {
+                    key: scene[key]
+                    for key in (
+                        "id",
+                        "image_asset_id",
+                        "placeholder_index",
+                        "duration_weight",
+                        "motion_style",
+                    )
+                }
+                for scene in snapshot["scenes"]
+            ],
         }
         generated_assets = [
             (
@@ -633,16 +837,24 @@ def render(pid: str, payload: RenderSettings | None = None):
         if previous and Path(previous["file_path"]).is_file():
             c.execute("UPDATE projects SET status='complete', error='' WHERE id=?", (pid,))
             return {"status": "complete", "id": pid, "job_id": previous["job_id"]}
+        project["scenes"] = [row for row in scene_rows(c, pid) if row["enabled"]]
         project["images"] = [
-            dict(r)
-            for r in c.execute(
-                "SELECT * FROM assets WHERE project_id=? AND type='image' ORDER BY rowid",
-                (pid,),
-            )
+            {
+                key: row[key]
+                for key in (
+                    "image_asset_id",
+                    "local_path",
+                    "source_url",
+                    "license_name",
+                    "checksum",
+                )
+            }
+            for row in project["scenes"]
+            if row["image_asset_id"]
         ]
-        if not project["placeholders"] and not project["images"]:
+        if not project["scenes"]:
             raise HTTPException(
-                409, "Upload licensed images or choose the labeled placeholder pack"
+                409, "Upload images or choose placeholders; keep at least one scene included"
             )
         project["quality"] = quality
         project["pipeline_signature"] = pipeline_signature
