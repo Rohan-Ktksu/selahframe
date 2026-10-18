@@ -29,7 +29,7 @@ failed on restart and can be retried. Local exports work without Ollama or Drive
 
 Ollama remains optional and is not installed in this checkout. Drive uploads require
 rclone and your browser OAuth authorization; no real Drive transfer has been tested.
-Music mixing and word alignment remain on the roadmap.
+Word alignment remains on the roadmap.
 No public hosting or paid AI service is required. No automatic media cleanup occurs.
 The source code is MIT; tools, models and supplied media retain their own licenses.
 
@@ -38,3 +38,10 @@ zoom-in/zoom-out/still motion are saved per project. Time weights share the meas
 narration duration; shown seconds are estimates from the last narration. Changing
 scenes preserves script approval and requires a new render. Excluded images remain
 stored locally. The first uploaded image replaces the generated placeholder plan.
+
+Optional music: import a local WAV, MP3 or FLAC with its source/license and permission
+confirmation. Preview it, enable it and save a background level before rendering.
+The default is narration only. Music loops to the measured narration length, fades
+at both ends and is ducked beneath speech. Up to three tracks per project are kept,
+along with their originals. Music changes retain script approval and require a new
+export. No third-party music is downloaded or included in the source package.

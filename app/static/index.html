@@ -7,6 +7,7 @@ main{max-width:820px;margin:30px auto;padding:24px}h1{margin-bottom:5px}
 section{background:#1c2a3d;border:1px solid #33455a;padding:20px;margin-top:18px;border-radius:12px}
 input,textarea{box-sizing:border-box;width:100%;padding:12px;border-radius:6px;border:1px solid #718096;background:#0d1826;color:#fff;margin:7px 0 14px}
 textarea{min-height:130px}button{background:#e8b76c;color:#1e2531;border:0;border-radius:7px;padding:11px 15px;margin:6px 5px 6px 0;cursor:pointer;font-weight:650}
+summary{cursor:pointer;padding:8px 0;color:#e8b76c}audio{margin-top:8px}
 fieldset{border:0;padding:0;margin:0;min-width:0}select{padding:9px;border-radius:6px;max-width:100%}
 .scene-card{display:grid;grid-template-columns:100px minmax(0,1fr);gap:16px;border-top:1px solid #3c4d61;padding:18px 0}
 .scene-card img{width:100px;height:178px;object-fit:cover;border-radius:8px}.scene-card h3{margin:0 0 10px}.scene-card p{margin:5px 0;overflow-wrap:anywhere}
@@ -40,7 +41,25 @@ button:disabled{opacity:.35;cursor:not-allowed}a{color:#ffe0a5}small{color:#acb9
 <fieldset id="sceneControls"><div id="sceneList"></div>
 <button id="saveScenes" onclick="saveScenePlan()">Save scene plan</button>
 <button onclick="reloadScenePlan()">Reload saved scenes</button></fieldset></section>
-<section><h2>4 · Build and archive video</h2>
+<section id="musicEditor"><h2>4 · Optional background music</h2>
+<p><small>Preview a track you have permission to use. Music starts off. When enabled, it loops to fit the narration, fades at the ends and drops beneath speech.</small></p>
+<p id="musicNotice" aria-live="polite">Open a project to choose music.</p>
+<details id="musicUploadPanel" open><summary>Import a music track</summary><fieldset id="musicImportControls">
+<label id="musicLimits" for="musicFile">Local WAV, MP3 or FLAC · up to 25 MB and 5 minutes</label><input id="musicFile" type="file" accept=".wav,.mp3,.flac">
+<label for="musicSource">Music source or ownership</label><input id="musicSource" placeholder="Source URL or your own composition">
+<label for="musicLicense">Music license / permission</label><input id="musicLicense" placeholder="License and any required attribution">
+<label><input id="musicRights" type="checkbox" style="width:auto"> I have permission to use this track in the exported video</label><p><button onclick="uploadMusic()">Import music track</button></p>
+</fieldset></details>
+<fieldset id="musicControls">
+<label for="musicTrack">Imported track · up to 3 per project</label><select id="musicTrack" onchange="musicChanged();updateMusicPreview()"><option value="">No track selected</option></select>
+<p id="musicAttribution"><small>No music imported.</small></p>
+<audio id="musicPreview" controls hidden preload="none" style="width:100%"></audio>
+<p><label><input id="musicEnabled" type="checkbox" style="width:auto" onchange="musicChanged()"> Include background music in the next render</label></p>
+<label for="musicGain">Background level: <output id="musicGainLabel">−18 dB</output></label><input id="musicGain" type="range" min="-30" max="-6" value="-18" step="1" oninput="musicChanged()">
+<small>Lower values are quieter. Automatic ducking reduces this level further during speech. Preview the final video to check the balance.</small><p>
+<button onclick="saveMusicPlan()">Save music settings</button><button onclick="reloadMusicPlan()">Reload saved music</button></p>
+</fieldset></section>
+<section><h2>5 · Build and archive video</h2>
 <small>Upload JPG / PNG scenes you have rights to use, or explicitly select the abstract placeholder pack when creating the project.
 The MVP makes image slides with narration (no fully animated scene generation yet).</small>
 <label>Image source or ownership</label><input id="image_source" placeholder="Source URL or your own photograph"><label>Image license / permission</label><input id="image_license" placeholder="Your ownership or applicable license"><p><input id="image" type="file" accept="image/*"><button onclick="uploadImage()">Add image</button></p>
@@ -52,6 +71,8 @@ The MVP makes image slides with narration (no fully animated scene generation ye
 <script>
 const base='/api/projects';
 let scriptVersion=null;
+let maxMusicMB=25;
+let musicProject=null,musicRevision=null,musicTracks=[],musicDirty=false;
 let sceneProject=null,sceneRevision=null,sceneItems=[],sceneDirty=false,sceneNarrationMs=null,sceneBusy=false,sceneLastJob=null;
 const value=id=>document.getElementById(id).value;
 const pid=()=>encodeURIComponent(value('pid').trim());
@@ -65,12 +86,12 @@ async function create(){action(async()=>{let data=Object.fromEntries(['title','r
 async function draft(){action(async()=>{let p=await req(`${base}/${pid()}/generate-script`,'POST');document.getElementById('narration').value=p.script;scriptVersion=p.script_version;await refresh();})}
 async function save(){action(async()=>{let p=await req(`${base}/${pid()}/script`,'PUT',{script:value('narration')});scriptVersion=p.script_version;await refresh()})}
 async function approve(){action(async()=>{let p=await req(`${base}/${pid()}`);if(p.script!==value('narration'))throw Error('Save your edits before approval');await req(`${base}/${pid()}/approve`,'POST',{script_version:scriptVersion});await refresh()})}
-async function reopen(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('narration').value=p.script;['title','reference','scripture','translation','scripture_source','source_license','context_text'].forEach(k=>document.getElementById(k).value=p[k]);document.getElementById('placeholders').checked=!!p.placeholders;scriptVersion=p.script_version;await loadScenePlan();await refresh()})}
+async function reopen(){return action(async()=>{let p=await req(`${base}/${pid()}`);document.getElementById('narration').value=p.script;['title','reference','scripture','translation','scripture_source','source_license','context_text'].forEach(k=>document.getElementById(k).value=p[k]);document.getElementById('placeholders').checked=!!p.placeholders;scriptVersion=p.script_version;await loadScenePlan();await loadMusicPlan();await refresh()})}
 async function listProjects(){action(async()=>{let rows=await req(base);let box=document.getElementById('projects');box.replaceChildren();rows.forEach(p=>{let b=document.createElement('button');b.textContent=p.title+' · '+p.status;b.onclick=()=>{document.getElementById('pid').value=p.id;reopen()};box.appendChild(b)})})}
 async function uploadImage(){action(async()=>{if(sceneDirty)throw Error('Save or reload your scene edits before adding an image');let f=document.getElementById('image').files[0];if(!f)throw Error('Choose an image');let fd=new FormData();fd.append('image',f);if(!value('image_source').trim()||!value('image_license').trim())throw Error('Record the image source and license before uploading');fd.append('source_url',value('image_source'));fd.append('license_name',value('image_license'));await req(`${base}/${pid()}/images`,'POST',fd,true);await loadScenePlan();await refresh();})}
-async function render(){action(async()=>{if(sceneDirty)throw Error('Save the scene plan before rendering');let saved=await req(`${base}/${pid()}`);if(saved.script!==value('narration'))throw Error('Save and approve your narration edits before rendering');await req(`${base}/${pid()}/render`,'POST',{quality:value('quality')});await refresh()})}
-async function drive(){action(async()=>{await req(`${base}/${pid()}/upload-drive`,'POST');await refresh()})}
-async function refresh(){return action(async()=>{let p=await req(`${base}/${pid()}`);if(sceneProject===p.id&&!sceneDirty&&(p.image_revision!==sceneRevision||(p.status==='complete'&&p.job?.id&&p.job.id!==sceneLastJob))){sceneLastJob=p.job?.id;await loadScenePlan();}document.getElementById('status').textContent=JSON.stringify({status:p.status,drive_status:p.drive_status,error:p.error,id:p.id,image_count:p.image_count,script_version:p.script_version,approved_version:p.approved_version,job:p.job},null,2);sceneBusy=['rendering','uploading'].includes(p.status);document.getElementById('sceneControls').disabled=sceneBusy;document.getElementById('progress').value=p.job?.progress||0;document.getElementById('stage').textContent=p.job?`${p.job.stage} · ${p.job.progress}% · ${p.job.status}`:p.status;let a=document.getElementById('download'),v=document.getElementById('preview');v.hidden=p.status!=='complete';a.textContent='';if(p.status==='complete'){a.href=`${base}/${pid()}/download`;a.textContent='Download final video';let src=`${base}/${pid()}/preview?v=${p.job?.id||p.script_version}`;if(v.getAttribute('src')!==src)v.src=src;}})}
+async function render(){action(async()=>{if(sceneDirty)throw Error('Save the scene plan before rendering');if(musicDirty)throw Error('Save music settings before rendering');let saved=await req(`${base}/${pid()}`);if(saved.script!==value('narration'))throw Error('Save and approve your narration edits before rendering');await req(`${base}/${pid()}/render`,'POST',{quality:value('quality')});await refresh()})}
+async function drive(){action(async()=>{if(sceneDirty||musicDirty)throw Error('Save your scene and music settings, then render before archiving');let saved=await req(`${base}/${pid()}`);if(saved.script!==value('narration'))throw Error('Save, approve and render your narration edits before archiving');await req(`${base}/${pid()}/upload-drive`,'POST');await refresh()})}
+async function refresh(){return action(async()=>{let p=await req(`${base}/${pid()}`);if(sceneProject===p.id&&!sceneDirty&&(p.image_revision!==sceneRevision||(p.status==='complete'&&p.job?.id&&p.job.id!==sceneLastJob))){sceneLastJob=p.job?.id;await loadScenePlan();}if(musicProject===p.id&&!musicDirty&&p.music_revision!==musicRevision)await loadMusicPlan();document.getElementById('status').textContent=JSON.stringify({status:p.status,drive_status:p.drive_status,error:p.error,id:p.id,image_count:p.image_count,script_version:p.script_version,approved_version:p.approved_version,job:p.job},null,2);sceneBusy=['rendering','uploading','importing_music'].includes(p.status);document.getElementById('sceneControls').disabled=sceneBusy;document.getElementById('musicControls').disabled=sceneBusy;document.getElementById('musicImportControls').disabled=sceneBusy;document.getElementById('progress').value=p.job?.progress||0;document.getElementById('stage').textContent=p.job?`${p.job.stage} · ${p.job.progress}% · ${p.job.status}`:p.status;let a=document.getElementById('download'),v=document.getElementById('preview');v.hidden=p.status!=='complete';a.textContent='';if(p.status==='complete'){a.href=`${base}/${pid()}/download`;a.textContent='Download final video';let src=`${base}/${pid()}/preview?v=${p.job?.id||p.script_version}`;if(v.getAttribute('src')!==src)v.src=src;}})}
 function sceneDraftChanged(){sceneDirty=true;updateSceneShares();document.getElementById('sceneNotice').textContent='Unsaved scene changes. Save the plan before rendering.';}
 function updateSceneShares(){
  const total=sceneItems.filter(s=>s.enabled).reduce((n,s)=>n+Number(s.duration_weight||0),0);
@@ -108,8 +129,34 @@ async function saveScenePlan(){return action(async()=>{
  if(!scenes.some(s=>s.enabled))throw Error('Include at least one scene');
  await req(`${base}/${pid()}/scenes`,'PUT',{image_revision:sceneRevision,scenes});await loadScenePlan();await refresh();document.getElementById('sceneNotice').textContent='Scene plan saved. Render to apply any changes.';
 })}
+function musicChanged(){musicDirty=true;document.getElementById('musicGainLabel').textContent=value('musicGain')+' dB';document.getElementById('musicNotice').textContent='Unsaved music changes. Save before rendering.';}
+function updateMusicPreview(){
+ const track=musicTracks.find(t=>t.id===value('musicTrack')),audio=document.getElementById('musicPreview');
+ audio.hidden=!track;if(track){if(audio.getAttribute('src')!==track.preview_url){audio.pause();audio.src=track.preview_url;}document.getElementById('musicAttribution').textContent=`${(track.duration_ms/1000).toFixed(1)}s · Source: ${track.source_url} · Rights: ${track.license_name}`;}
+ else{audio.pause();audio.removeAttribute('src');document.getElementById('musicAttribution').textContent='No track selected.';}
+}
+async function loadMusicPlan(){
+ const project=value('pid').trim();if(!project)return;const plan=await req(`${base}/${encodeURIComponent(project)}/music`);if(value('pid').trim()!==project)return;
+ musicProject=project;musicRevision=plan.music_revision;musicTracks=plan.tracks;musicDirty=false;document.getElementById('musicUploadPanel').open=!musicTracks.length;
+ const select=document.getElementById('musicTrack');select.replaceChildren();const none=document.createElement('option');none.value='';none.textContent='No track selected';select.appendChild(none);
+ musicTracks.forEach(t=>{const option=document.createElement('option');option.value=t.id;option.textContent=t.name;select.appendChild(option)});select.value=plan.asset_id||'';
+ document.getElementById('musicEnabled').checked=plan.enabled;document.getElementById('musicGain').value=plan.gain_db;document.getElementById('musicGainLabel').textContent=plan.gain_db+' dB';updateMusicPreview();
+ document.getElementById('musicNotice').textContent=plan.enabled?'Music enabled. Render to apply the saved mix.':'Music is off. Your next export uses narration only.';
+}
+async function reloadMusicPlan(){return action(loadMusicPlan)}
+async function saveMusicPlan(){return action(async()=>{
+ if(musicProject!==value('pid').trim())throw Error('Reopen the project before changing music');
+ await req(`${base}/${pid()}/music`,'PUT',{music_revision:musicRevision,asset_id:value('musicTrack')||null,enabled:document.getElementById('musicEnabled').checked,gain_db:Number(value('musicGain'))});await loadMusicPlan();await refresh();
+})}
+async function uploadMusic(){return action(async()=>{
+ if(musicProject!==value('pid').trim())throw Error('Open a project first');if(musicDirty)throw Error('Save or reload music settings before importing');
+ const file=document.getElementById('musicFile').files[0];if(!file)throw Error('Choose a WAV, MP3 or FLAC track');if(file.size>maxMusicMB*1024*1024)throw Error(`Choose a track up to ${maxMusicMB} MB`);
+ if(!value('musicSource').trim()||!value('musicLicense').trim()||!document.getElementById('musicRights').checked)throw Error('Record the source/license and confirm your permission to use the track');
+ const fd=new FormData();fd.append('track',file);fd.append('source_url',value('musicSource'));fd.append('license_name',value('musicLicense'));fd.append('rights_confirmed','true');
+ await req(`${base}/${pid()}/music/tracks`,'POST',fd,true);document.getElementById('musicFile').value='';document.getElementById('musicRights').checked=false;document.getElementById('musicNotice').textContent='Importing and preparing a local preview…';await refresh();
+})}
 setInterval(()=>{if(value('pid'))refresh()},3000);
-req('/api/health').then(h=>{let missing=Object.entries(h.components).filter(([k,v])=>['ffmpeg','ffprobe','piper','voice_model'].includes(k)&&!v).map(([k])=>k);document.getElementById('readiness').textContent=missing.length?'Video setup needed: '+missing.join(', '):'Local voice and video tools ready · CPU rendering';}).catch(()=>{});
+req('/api/health').then(h=>{maxMusicMB=h.max_music_mb||25;document.getElementById('musicLimits').textContent=`Local WAV, MP3 or FLAC · up to ${maxMusicMB} MB and 5 minutes`;let missing=Object.entries(h.components).filter(([k,v])=>['ffmpeg','ffprobe','piper','voice_model'].includes(k)&&!v).map(([k])=>k);document.getElementById('readiness').textContent=missing.length?'Video setup needed: '+missing.join(', '):'Local voice and video tools ready · CPU rendering';}).catch(()=>{});
 listProjects();
 const selectedProject=new URLSearchParams(location.search).get('project');
 if(selectedProject){document.getElementById('pid').value=selectedProject;reopen();}

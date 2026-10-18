@@ -65,3 +65,34 @@ class MediaTests(unittest.TestCase):
     def test_unknown_motion_is_rejected(self):
         with self.assertRaisesRegex(media.MediaError, "motion"):
             media.scene_filter(720, 1280, 25, "unsafe-filter")
+
+    def test_music_rejects_unsafe_gain_and_unsupported_narration(self):
+        for duration, gain, channels in [
+            (8, 0, 1),
+            (8, float("nan"), 1),
+            (200, -18, 1),
+            (8, -18, 6),
+        ]:
+            with self.assertRaises(media.MediaError):
+                media.music_filter(duration, gain, channels)
+
+    def test_music_metadata_duration_channels_and_rate_are_bounded_before_decoding(self):
+        import json
+
+        for duration, channels, rate in [
+            (301, 2, 48000),
+            (0, 2, 48000),
+            (3, 6, 48000),
+            (3, 2, 384000),
+        ]:
+            metadata = {
+                "streams": [{"codec_type": "audio", "channels": channels, "sample_rate": rate}],
+                "format": {"duration": duration},
+            }
+            with (
+                patch.object(media, "executable", return_value="test-tool"),
+                patch.object(media, "run", return_value=json.dumps(metadata)) as run,
+            ):
+                with self.assertRaises(media.MediaError):
+                    media.normalize_music(Path("test.wav"), Path("normalized.wav"), 40 * 1024**2)
+            run.assert_called_once()

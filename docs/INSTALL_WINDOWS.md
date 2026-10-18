@@ -101,3 +101,24 @@ blue before red, gives blue twice the time, excludes green, renders and decodes 
 to check their actual color/order. It verifies that excluded originals remain intact.
 The technical test narration is explicitly approved by this developer script.
 It never approves user drafts or uploads anything to an external service.
+
+## Optional music and regression
+
+In section 4, import a local WAV, MP3 or FLAC, record the source/license and confirm
+permission. Preview the imported track, enable it, choose a background level and
+save. Render again to apply changes. Imports always start with music off. Short
+tracks loop to fit the voice; fades and speech ducking are automatic. All original
+tracks are retained. MAX_MUSIC_MB defaults to 25; the limit is also shown by the UI.
+No music provider, extra package or account is required.
+
+With local media tools installed, run the measured audio check:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke-music.py
+```
+
+With the server running, append --render to also create an explicitly reviewed
+technical demo and verify narration-only and music-enabled exports, media receipts,
+HTTP ranges and cache reuse. The script generates its own audio fixture; it does not
+approve user drafts or obtain music from an external service. A human should listen
+to the final preview for subjective balance and voice quality.

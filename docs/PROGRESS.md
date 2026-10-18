@@ -1,3 +1,63 @@
+# Optional music milestone — 2026-10-19
+
+Active checkout: D:\SelahFrame. The user controls GitHub pushes.
+
+- Added optional local music imports, preview, track selection, saved volume and
+  enable/disable controls. Imported tracks start OFF; narration-only remains default.
+- Required source/license and explicit permission confirmation. WAV/MP3/FLAC imports
+  have request, byte, duration, channel, sample-rate, count and scratch/disk bounds.
+  Format-forced FFmpeg decoding disables network protocols and strips metadata.
+- Added persistent music-import jobs sharing the global render/Drive lock. Edits are
+  blocked during import. Failure, worker-start failure and restart restore prior
+  project state/settings. Originals, earlier exports and failed staging are retained.
+- Schema version 4 adds soundtrack settings/revisions and original/normalized music
+  receipts. Music edits keep exact narration approval; previews, downloads, cached
+  renders and Drive admission require the current soundtrack revision.
+- Renderer loops/trims the normalized track to measured narration, fades the ends,
+  ducks beneath speech and limits peaks without auto-gain. Export folders contain
+  narration.wav, music.wav, mixed.wav and checksum/source/license receipts. Disabled
+  exports record music=null and retain their original narration-only audio path.
+- Dashboard folds import fields after a track exists. Unsaved narration, scene or
+  music edits cannot be archived through the UI without being saved/rendered first.
+
+Executed evidence:
+
+- 51 API/media regression tests passed (8.292 seconds in the feature run), including
+  stale settings, foreign assets, no-op saves, competing jobs, failures, restart,
+  original retention and changed-on-disk music rejection. TestClient still emits its
+  known httpx deprecation warning; it does not fail the suite.
+- Actual WAV, MP3 and FLAC fixtures each decoded to 2,000ms; malformed audio failed.
+- Deterministic audio calibration: background 20.60dB lower during the speech signal,
+  voice amplitude preserved at 0.4000, peak -7.80dBFS, duration exactly 8.000 seconds.
+- Live API regression rendered both narration-only and enabled-music 720p exports.
+  Music export: 13.36 seconds, 8.75 seconds render time, decoded AAC peak -1.31dBFS.
+  HTTP 206 audio ranges, new export ID after enabling, retained baseline, complete
+  media checksums and unchanged-export cache reuse all passed.
+- Browser tested music toggle/volume/save/reload and preview playback (4s track).
+  Browser-triggered 1080x1920 export: 13.24 seconds, H.264/AAC, saved -20dB music,
+  soundtrack revision 4, all asset checksums verified, no absolute paths in receipt.
+- Ruff lint/format, Python compileall and dashboard JavaScript syntax passed.
+- Screenshot: ignored temp/music-editor.png. Demo project:
+  1a8665d3-601a-4be3-af63-4817f2859607. Generated test music is an original sine chord;
+  no external music was downloaded or bundled. No new runtime dependency was added.
+
+Repeat on Windows with the server running:
+
+```powershell
+cd D:\SelahFrame
+.\.venv\Scripts\python.exe -m unittest discover -s tests -q
+.\.venv\Scripts\python.exe scripts\smoke-music.py --render
+```
+
+A subjective listening review is still a user action. Captions remain approximate.
+Ollama drafting and real Google Drive OAuth/transfers are not yet integration-tested;
+these prior limitations still apply. Structured scene/draft generation, forced word
+alignment, cancellation, reviewed cleanup and clean-machine release acceptance remain
+pending. Next milestone: structured local draft/scene planning, or user-authorized
+Drive setup. No automated cleanup, public publishing or GitHub push was performed.
+
+---
+
 # Scene editor milestone — 2026-10-18
 
 Active checkout: D:\SelahFrame. All changes remain local for the user's GitHub push.

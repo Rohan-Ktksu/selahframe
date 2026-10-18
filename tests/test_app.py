@@ -1,4 +1,5 @@
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -444,6 +445,263 @@ class AppTests(unittest.TestCase):
         second = self.client.get(self.url + "/scenes").json()["scenes"]
         self.assertEqual(first, second)
         self.assertEqual(first[0]["image_asset_id"], asset["asset_id"])
+
+    def import_test_music(self):
+        def normalize(source, destination, budget):
+            destination.write_bytes(b"normalized-music")
+            return 3000
+
+        def immediate_worker(target, args):
+            target(*args)
+
+        with (
+            patch.object(media, "normalize_music", side_effect=normalize),
+            patch.object(media, "executable", return_value="test-tool"),
+            patch.object(m, "start_worker", side_effect=immediate_worker),
+        ):
+            response = self.client.post(
+                self.url + "/music/tracks",
+                data={
+                    "source_url": "Original test composition",
+                    "license_name": "Owned fixture",
+                    "rights_confirmed": "true",
+                },
+                files={"track": ("../../test.wav", b"original-music", "audio/wav")},
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        return self.client.get(self.url + "/music").json()
+
+    def music_payload(self, plan, **changes):
+        return {
+            "music_revision": plan["music_revision"],
+            "asset_id": plan["asset_id"],
+            "enabled": plan["enabled"],
+            "gain_db": plan["gain_db"],
+            **changes,
+        }
+
+    def test_music_off_by_default_and_import_preserves_approval_original_and_preview(self):
+        self.approve()
+        self.assertFalse(self.client.get(self.url + "/music").json()["enabled"])
+        plan = self.import_test_music()
+        self.assertFalse(plan["enabled"])
+        self.assertEqual(plan["tracks"][0]["name"], "test.wav")
+        self.assertEqual(self.client.get(self.url).json()["approved_version"], 1)
+        preview = plan["tracks"][0]["preview_url"]
+        self.assertEqual(self.client.get(preview, headers={"Range": "bytes=0-3"}).status_code, 206)
+        with m.connection() as c:
+            row = c.execute("SELECT * FROM music_tracks").fetchone()
+        self.assertEqual(Path(row["original_path"]).read_bytes(), b"original-music")
+        self.assertNotIn("local_path", str(plan))
+
+    def test_music_requires_rights_and_real_supported_file_extension(self):
+        data = {"source_url": "Fixture", "license_name": "Owned"}
+        response = self.client.post(
+            self.url + "/music/tracks", data=data, files={"track": ("track.wav", b"x")}
+        )
+        self.assertEqual(response.status_code, 400)
+        data["rights_confirmed"] = "true"
+        response = self.client.post(
+            self.url + "/music/tracks",
+            data=data,
+            files={"track": ("playlist.m3u", b"http://example.invalid")},
+        )
+        self.assertEqual(response.status_code, 400)
+        with (
+            patch.object(media, "executable", return_value="test-tool"),
+            patch.object(m, "MAX_MUSIC_BYTES", 3),
+        ):
+            response = self.client.post(
+                self.url + "/music/tracks", data=data, files={"track": ("track.wav", b"1234")}
+            )
+        self.assertEqual(response.status_code, 413)
+
+    def test_music_settings_stale_noop_validation_and_project_ownership(self):
+        plan = self.import_test_music()
+        saved = self.client.put(self.url + "/music", json=self.music_payload(plan)).json()
+        self.assertEqual(saved["music_revision"], plan["music_revision"])
+        saved = self.client.put(
+            self.url + "/music", json=self.music_payload(plan, enabled=True)
+        ).json()
+        self.assertEqual(saved["music_revision"], plan["music_revision"] + 1)
+        self.assertEqual(
+            self.client.put(self.url + "/music", json=self.music_payload(plan)).status_code, 409
+        )
+        for changes, status in [
+            ({"gain_db": 0}, 422),
+            ({"asset_id": None, "enabled": True}, 400),
+            ({"asset_id": "foreign-id"}, 400),
+        ]:
+            self.assertEqual(
+                self.client.put(
+                    self.url + "/music", json=self.music_payload(saved, **changes)
+                ).status_code,
+                status,
+            )
+        other = self.client.post("/api/projects", json=self.payload).json()["id"]
+        self.assertEqual(
+            self.client.get(
+                f"/api/projects/{other}/music/tracks/{plan['asset_id']}/preview"
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.put(
+                f"/api/projects/{other}/music", json=self.music_payload(plan, music_revision=0)
+            ).status_code,
+            400,
+        )
+
+    def test_music_change_invalidates_export_cache_download_and_drive(self):
+        original = self.seed_export()
+        plan = self.import_test_music()
+        self.client.put(self.url + "/music", json=self.music_payload(plan, enabled=True))
+        # Even an old complete status cannot expose the stale export.
+        m.update_project(self.pid, status="complete")
+        self.assertEqual(self.client.get(self.url + "/download").status_code, 404)
+        self.assertEqual(self.client.post(self.url + "/upload-drive").status_code, 404)
+        with patch.object(m, "start_worker") as worker:
+            response = self.client.post(self.url + "/render")
+        self.assertEqual(response.status_code, 202)
+        worker.assert_called_once()
+        with m.connection() as c:
+            snapshot = json.loads(
+                c.execute(
+                    "SELECT snapshot_json FROM jobs WHERE id=?", (response.json()["job_id"],)
+                ).fetchone()[0]
+            )
+        self.assertEqual(snapshot["music"]["id"], plan["asset_id"])
+        self.assertTrue(original.is_file())
+        self.assertEqual(
+            self.client.put(self.url + "/music", json=self.music_payload(plan)).status_code, 409
+        )
+
+    def test_music_import_locks_edits_and_other_jobs_then_recovers_after_restart(self):
+        self.approve()
+        with (
+            patch.object(media, "executable", return_value="test-tool"),
+            patch.object(m, "start_worker"),
+        ):
+            response = self.client.post(
+                self.url + "/music/tracks",
+                data={"source_url": "Fixture", "license_name": "Owned", "rights_confirmed": "true"},
+                files={"track": ("track.wav", b"staged-audio")},
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.client.get(self.url).json()["status"], "importing_music")
+        self.assertEqual(self.client.post(self.url + "/render").status_code, 409)
+        self.assertEqual(
+            self.client.put(
+                self.url + "/script", json={"script": "Blocked during audio import"}
+            ).status_code,
+            409,
+        )
+        self.assertEqual(
+            self.client.post(self.url + "/approve", json={"script_version": 1}).status_code, 409
+        )
+        self.assertEqual(
+            self.client.put(self.url + "/scenes", json=self.scene_plan()).status_code, 409
+        )
+        self.assertEqual(
+            self.client.put(self.url + "/music", json={"music_revision": 0}).status_code, 409
+        )
+        m.initialize()
+        self.assertEqual(self.client.get(self.url).json()["status"], "approved")
+        self.assertEqual(
+            self.client.get("/api/v1/jobs/" + response.json()["job_id"]).json()["status"], "failed"
+        )
+
+    def test_failed_music_decode_restores_previous_export_and_settings(self):
+        video = self.seed_export()
+
+        def immediate_worker(target, args):
+            target(*args)
+
+        with (
+            patch.object(media, "executable", return_value="test-tool"),
+            patch.object(m, "start_worker", side_effect=immediate_worker),
+            patch.object(media, "normalize_music", side_effect=media.MediaError("Invalid audio")),
+        ):
+            response = self.client.post(
+                self.url + "/music/tracks",
+                data={"source_url": "Fixture", "license_name": "Owned", "rights_confirmed": "true"},
+                files={"track": ("not-audio.wav", b"invalid")},
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.client.get(self.url).json()["status"], "complete")
+        self.assertEqual(self.client.get(self.url + "/download").status_code, 200)
+        self.assertFalse(self.client.get(self.url + "/music").json()["tracks"])
+        self.assertTrue(video.is_file())
+
+    def test_music_track_limit_and_failed_worker_release(self):
+        for _ in range(3):
+            self.import_test_music()
+        with patch.object(media, "executable", return_value="test-tool"):
+            response = self.client.post(
+                self.url + "/music/tracks",
+                data={"source_url": "Fixture", "license_name": "Owned", "rights_confirmed": "true"},
+                files={"track": ("track.wav", b"audio")},
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(len(self.client.get(self.url + "/music").json()["tracks"]), 3)
+
+    def test_music_missing_or_changed_file_never_silently_exports_without_it(self):
+        plan = self.import_test_music()
+        self.approve()
+        self.client.put(self.url + "/music", json=self.music_payload(plan, enabled=True))
+        with m.connection() as c:
+            row = c.execute(
+                "SELECT local_path FROM assets WHERE id=?", (plan["asset_id"],)
+            ).fetchone()
+        Path(row[0]).write_bytes(b"changed-after-import")
+        with patch.object(m, "start_worker"):
+            response = self.client.post(self.url + "/render")
+        m.render_worker(self.pid, response.json()["job_id"])
+        job = self.client.get("/api/v1/jobs/" + response.json()["job_id"]).json()
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("changed on disk", job["error"])
+
+    def test_music_worker_start_failure_releases_lock_and_retains_old_export(self):
+        video = self.seed_export()
+        with (
+            patch.object(media, "executable", return_value="test-tool"),
+            patch.object(m, "start_worker", side_effect=RuntimeError("thread unavailable")),
+        ):
+            response = self.client.post(
+                self.url + "/music/tracks",
+                data={"source_url": "Fixture", "license_name": "Owned", "rights_confirmed": "true"},
+                files={"track": ("track.wav", b"staged")},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.client.get(self.url).json()["status"], "complete")
+        self.assertTrue(video.is_file())
+        with m.connection() as c:
+            self.assertIsNone(c.execute("SELECT id FROM jobs WHERE status='running'").fetchone())
+
+    def test_music_and_render_cannot_both_claim_global_job(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.approve()
+
+        def upload():
+            return self.client.post(
+                self.url + "/music/tracks",
+                data={"source_url": "Fixture", "license_name": "Owned", "rights_confirmed": "true"},
+                files={"track": ("track.wav", b"staged")},
+            ).status_code
+
+        with (
+            patch.object(media, "executable", return_value="test-tool"),
+            patch.object(m, "start_worker"),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            imported = pool.submit(upload)
+            rendered = pool.submit(lambda: self.client.post(self.url + "/render").status_code)
+            self.assertEqual(sorted([imported.result(), rendered.result()]), [202, 409])
+        with m.connection() as c:
+            self.assertEqual(
+                c.execute("SELECT COUNT(*) FROM jobs WHERE status='running'").fetchone()[0], 1
+            )
 
 
 if __name__ == "__main__":

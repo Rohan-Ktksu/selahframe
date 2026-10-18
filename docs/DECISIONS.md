@@ -46,3 +46,20 @@
   replaces abstract placeholders, matching the previous renderer's selection behavior.
 - Keep thumbnails local, ownership-checked and under the project directory. No URLs
   supplied by users are fetched to generate them. Metadata stays text, never HTML.
+
+## Optional licensed soundtrack
+
+- Music is opt-in and every import starts disabled. Require source/license plus
+  explicit permission confirmation; no provider downloads or bundled third-party music.
+- Keep at most three tracks per project. Bound upload size, decoded duration/channels,
+  sample rate and disk use. Force a local audio demuxer and disable network protocols.
+- Share the persistent global job lock for import/render/Drive and restore previous
+  project state after a failed/interrupted import. Retain original and normalized files.
+- Store soundtrack revisions independently from narration/scene versions, preserve
+  narration approval and gate cached/preview/download/Drive exports by that revision.
+- Normalize the preview/bed once, then loop/trim it to measured narration. Duck the
+  music with FFmpeg sidechaincompress, fade at both ends, keep voice gain and limit
+  peaks without limiter auto-gain. Keep raw voice and mixed audio for review.
+- Filter reference: https://ffmpeg.org/ffmpeg-filters.html#sidechaincompress.
+  A deterministic tone projection checks actual ducking independently of the filter
+  expression. No claim of subjective listening quality follows from that measurement.

@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 Image.MAX_IMAGE_PIXELS = 20_000_000
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "12")) * 1024 * 1024
+MAX_MUSIC_BYTES = int(os.getenv("MAX_MUSIC_MB", "25")) * 1024 * 1024
+BUSY_STATUSES = {"rendering", "uploading", "importing_music"}
 DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 DB = DATA / "projects.sqlite3"
@@ -64,21 +66,21 @@ async def lifespan(application):
         handle.close()
 
 
-app = FastAPI(title="SelahFrame", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="SelahFrame", version="0.4.0", lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
 
 @app.middleware("http")
 async def local_origin_guard(request, call_next):
-    if request.method == "POST" and request.url.path.endswith("/images"):
+    if request.method == "POST" and request.url.path.endswith(("/images", "/music/tracks")):
+        is_music = request.url.path.endswith("/music/tracks")
+        cap = MAX_MUSIC_BYTES if is_music else MAX_UPLOAD_BYTES
         length = request.headers.get("content-length", "")
         if not length.isdecimal():
+            return JSONResponse({"detail": "An upload requires Content-Length"}, status_code=411)
+        if int(length) > cap + 1024 * 1024:
             return JSONResponse(
-                {"detail": "An image upload requires Content-Length"}, status_code=411
-            )
-        if int(length) > MAX_UPLOAD_BYTES + 1024 * 1024:
-            return JSONResponse(
-                {"detail": "Image upload exceeds the request size limit"},
+                {"detail": "Upload exceeds the request size limit"},
                 status_code=413,
             )
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
@@ -122,6 +124,10 @@ def initialize():
             "source_license": "TEXT NOT NULL DEFAULT ''",
             "context_text": "TEXT NOT NULL DEFAULT ''",
             "placeholders": "INTEGER NOT NULL DEFAULT 0",
+            "music_asset_id": "TEXT",
+            "music_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "music_gain_db": "REAL NOT NULL DEFAULT -18",
+            "music_revision": "INTEGER NOT NULL DEFAULT 0",
         }.items():
             if name not in columns:
                 c.execute(f"ALTER TABLE projects ADD COLUMN {name} {definition}")
@@ -153,7 +159,14 @@ def initialize():
         export_columns = {r[1] for r in c.execute("PRAGMA table_info(exports)")}
         if "pipeline_signature" not in export_columns:
             c.execute("ALTER TABLE exports ADD COLUMN pipeline_signature TEXT NOT NULL DEFAULT ''")
+        if "music_revision" not in export_columns:
+            c.execute("ALTER TABLE exports ADD COLUMN music_revision INTEGER NOT NULL DEFAULT 0")
         c.executescript("""
+            CREATE TABLE IF NOT EXISTS music_tracks (
+                asset_id TEXT PRIMARY KEY REFERENCES assets(id),
+                original_path TEXT NOT NULL, original_checksum TEXT NOT NULL,
+                uploaded_name TEXT NOT NULL, duration_ms INTEGER NOT NULL,
+                rights_confirmed INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS scenes (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
                 idx INTEGER NOT NULL, image_asset_id TEXT REFERENCES assets(id),
@@ -164,7 +177,15 @@ def initialize():
         """)
         for row in c.execute("SELECT id, placeholders FROM projects").fetchall():
             ensure_scenes(c, row["id"], bool(row["placeholders"]))
-        c.execute("PRAGMA user_version=3")
+        c.execute("PRAGMA user_version=4")
+        for row in c.execute(
+            "SELECT project_id, snapshot_json FROM jobs WHERE status IN ('queued', 'running')"
+        ).fetchall():
+            previous = json.loads(row["snapshot_json"]).get("previous_status", "approved")
+            c.execute(
+                "UPDATE projects SET status=?, error='Music import interrupted. Retry the upload.' WHERE id=? AND status='importing_music'",
+                (previous, row["project_id"]),
+            )
         c.execute("UPDATE projects SET script_version=1 WHERE script_version=0 AND script<>''")
         c.execute(
             "INSERT OR IGNORE INTO scripts (id, project_id, version, narration_text, approved_at) SELECT id, id, script_version, script, CASE WHEN approved_version=script_version THEN CURRENT_TIMESTAMP ELSE NULL END FROM projects WHERE script<>''"
@@ -229,6 +250,14 @@ class ScenePlan(BaseModel):
     model_config = {"extra": "forbid"}
     image_revision: int = Field(ge=0)
     scenes: list[SceneEdit] = Field(min_length=1, max_length=24)
+
+
+class MusicSettings(BaseModel):
+    model_config = {"extra": "forbid"}
+    music_revision: int = Field(ge=0)
+    asset_id: str | None = Field(default=None, min_length=1, max_length=36)
+    enabled: bool = False
+    gain_db: float = Field(default=-18, ge=-30, le=-6, allow_inf_nan=False)
 
 
 class NewProject(BaseModel):
@@ -303,6 +332,7 @@ def health():
         },
         "caption_timing": "approximate",
         "max_concurrent_jobs": 1,
+        "max_music_mb": MAX_MUSIC_BYTES // (1024 * 1024),
     }
 
 
@@ -399,8 +429,8 @@ def save_script(pid, text, expected_version=None):
                 409,
                 "The script changed while drafting. Review your saved edits before generating again.",
             )
-        if row[0] in {"rendering", "uploading"}:
-            raise HTTPException(409, "Wait for the current render before editing")
+        if row[0] in BUSY_STATUSES:
+            raise HTTPException(409, "Wait for the active job before editing")
         c.execute(
             "UPDATE projects SET script=?, script_version=script_version+1, approved_version=NULL, status='review', error='', drive_status='' WHERE id=?",
             (text, pid),
@@ -418,10 +448,10 @@ def approve(pid: str, payload: Approval):
         raise HTTPException(400, "Generate or write narration first")
     with connection() as c:
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("SELECT status FROM projects WHERE id=?", (pid,)).fetchone()[0] in {
-            "rendering",
-            "uploading",
-        }:
+        if (
+            c.execute("SELECT status FROM projects WHERE id=?", (pid,)).fetchone()[0]
+            in BUSY_STATUSES
+        ):
             raise HTTPException(409, "Render in progress")
         if (
             c.execute("SELECT script_version FROM projects WHERE id=?", (pid,)).fetchone()[0]
@@ -446,7 +476,7 @@ async def upload_image(
     source_url: str = Form(..., min_length=1, max_length=1000),
     license_name: str = Form(..., min_length=1, max_length=500),
 ):
-    if load_project(pid)["status"] in {"rendering", "uploading"}:
+    if load_project(pid)["status"] in BUSY_STATUSES:
         raise HTTPException(409, "Wait for the render before adding images")
     ext = Path(image.filename or "").suffix.lower()
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
@@ -475,7 +505,7 @@ async def upload_image(
         count = c.execute(
             "SELECT COUNT(*) FROM assets WHERE project_id=? AND type='image'", (pid,)
         ).fetchone()[0]
-        if state in {"rendering", "uploading"} or count >= 24:
+        if state in BUSY_STATUSES or count >= 24:
             path.unlink(missing_ok=True)
             raise HTTPException(409, "Project is busy or has reached the 24-image limit")
         asset_id = str(uuid.uuid4())
@@ -547,7 +577,7 @@ def save_scenes(pid: str, payload: ScenePlan):
     with connection() as c:
         c.execute("BEGIN IMMEDIATE")
         project = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
-        if project["status"] in {"rendering", "uploading"}:
+        if project["status"] in BUSY_STATUSES:
             raise HTTPException(409, "Wait for the active job before editing scenes")
         if payload.image_revision != project["image_revision"]:
             raise HTTPException(
@@ -637,6 +667,220 @@ def run(cmd, timeout=600, input_text=None):
         )
 
 
+def music_rows(c, pid):
+    return [
+        dict(row)
+        for row in c.execute(
+            "SELECT a.*, t.uploaded_name, t.duration_ms, t.original_checksum FROM assets a JOIN music_tracks t ON t.asset_id=a.id WHERE a.project_id=? AND a.type='music' ORDER BY a.rowid",
+            (pid,),
+        )
+    ]
+
+
+def music_path(pid, row):
+    path = Path(row["local_path"]).resolve()
+    try:
+        path.relative_to((OUTPUT / pid / "music").resolve())
+    except ValueError:
+        raise media.MediaError("Invalid music asset path. Import the track again.")
+    if not path.is_file():
+        raise media.MediaError("The music file is missing. Restore it or import another track.")
+    return path
+
+
+@app.get("/api/projects/{pid}/music")
+def get_music(pid: str):
+    project = load_project(pid)
+    with connection() as c:
+        tracks = music_rows(c, pid)
+    return {
+        "music_revision": project["music_revision"],
+        "asset_id": project["music_asset_id"],
+        "enabled": bool(project["music_enabled"]),
+        "gain_db": project["music_gain_db"],
+        "tracks": [
+            {
+                "id": row["id"],
+                "name": row["uploaded_name"],
+                "duration_ms": row["duration_ms"],
+                "source_url": row["source_url"],
+                "license_name": row["license_name"],
+                "preview_url": f"/api/projects/{pid}/music/tracks/{row['id']}/preview",
+            }
+            for row in tracks
+        ],
+    }
+
+
+@app.put("/api/projects/{pid}/music")
+def save_music(pid: str, payload: MusicSettings):
+    load_project(pid)
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        project = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if project["status"] in BUSY_STATUSES:
+            raise HTTPException(409, "Wait for the active job before changing music")
+        if payload.music_revision != project["music_revision"]:
+            raise HTTPException(409, "Music settings changed. Reload them and retry.")
+        tracks = music_rows(c, pid)
+        if payload.asset_id and not any(row["id"] == payload.asset_id for row in tracks):
+            raise HTTPException(400, "Select a music track from this project")
+        if payload.enabled and not payload.asset_id:
+            raise HTTPException(400, "Import and select a track before enabling music")
+        if (
+            project["music_asset_id"],
+            bool(project["music_enabled"]),
+            project["music_gain_db"],
+        ) != (payload.asset_id, payload.enabled, payload.gain_db):
+            c.execute(
+                "UPDATE projects SET music_asset_id=?, music_enabled=?, music_gain_db=?, music_revision=music_revision+1, status=CASE WHEN approved_version=script_version THEN 'approved' ELSE 'review' END, error='', drive_status='' WHERE id=?",
+                (payload.asset_id, int(payload.enabled), payload.gain_db, pid),
+            )
+    return get_music(pid)
+
+
+@app.get("/api/projects/{pid}/music/tracks/{asset_id}/preview")
+def preview_music(pid: str, asset_id: str):
+    load_project(pid)
+    with connection() as c:
+        row = next((row for row in music_rows(c, pid) if row["id"] == asset_id), None)
+    if not row:
+        raise HTTPException(404, "Music track not found")
+    try:
+        path = music_path(pid, row)
+    except media.MediaError as exc:
+        raise HTTPException(404, str(exc))
+    return FileResponse(path, media_type="audio/wav")
+
+
+def fail_music_import(pid, job_id, previous_status, error):
+    with connection() as c:
+        c.execute(
+            "UPDATE jobs SET status='failed', error=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+            (error, job_id),
+        )
+        c.execute(
+            "UPDATE projects SET status=?, error=? WHERE id=? AND status='importing_music'",
+            (previous_status, error, pid),
+        )
+
+
+def music_import_worker(pid, job_id, source, snapshot):
+    try:
+        normalized = source.parent / "normalized.wav"
+        budget = media.disk_guard(
+            OUTPUT.parent / "temp", reserve=40 * 1024**2, extra_folder=source.parent.parent
+        )
+        duration_ms = media.normalize_music(source, normalized, budget)
+        media.disk_guard(OUTPUT.parent / "temp", extra_folder=source.parent.parent)
+        asset_id = str(uuid.uuid4())
+        with connection() as c:
+            c.execute(
+                "INSERT INTO assets (id, project_id, type, local_path, source_url, license_name, checksum) VALUES (?, ?, 'music', ?, ?, ?, ?)",
+                (
+                    asset_id,
+                    pid,
+                    str(normalized),
+                    snapshot["source_url"],
+                    snapshot["license_name"],
+                    media.digest(normalized),
+                ),
+            )
+            c.execute(
+                "INSERT INTO music_tracks (asset_id, original_path, original_checksum, uploaded_name, duration_ms) VALUES (?, ?, ?, ?, ?)",
+                (
+                    asset_id,
+                    str(source),
+                    media.digest(source),
+                    snapshot["uploaded_name"],
+                    duration_ms,
+                ),
+            )
+            # Importing never enables an unpreviewed track or revokes narration approval.
+            c.execute(
+                "UPDATE projects SET music_asset_id=?, music_enabled=0, music_revision=music_revision+1, status=CASE WHEN approved_version=script_version THEN 'approved' ELSE 'review' END, error='', drive_status='' WHERE id=?",
+                (asset_id, pid),
+            )
+            c.execute(
+                "UPDATE jobs SET status='complete', stage='complete', progress=100, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+    except Exception as exc:
+        message = (
+            str(exc)
+            if isinstance(exc, media.MediaError)
+            else "Music import failed. Choose a valid WAV, MP3 or FLAC file and retry."
+        )
+        fail_music_import(pid, job_id, snapshot["previous_status"], message)
+
+
+@app.post("/api/projects/{pid}/music/tracks", status_code=202)
+async def import_music(
+    pid: str,
+    track: UploadFile = File(...),
+    source_url: str = Form(..., min_length=1, max_length=1000),
+    license_name: str = Form(..., min_length=1, max_length=500),
+    rights_confirmed: bool = Form(False),
+):
+    load_project(pid)
+    if not rights_confirmed or not source_url.strip() or not license_name.strip():
+        raise HTTPException(
+            400, "Record the source/license and confirm permission to use this music"
+        )
+    suffix = Path(track.filename or "").suffix.lower()
+    if suffix not in media.MUSIC_FORMATS:
+        raise HTTPException(400, "Choose a WAV, MP3 or FLAC file")
+    if not media.executable("ffmpeg") or not media.executable("ffprobe"):
+        raise HTTPException(503, "Install local FFmpeg tools before importing music")
+    data = await track.read(MAX_MUSIC_BYTES + 1)
+    if not data or len(data) > MAX_MUSIC_BYTES:
+        raise HTTPException(
+            413, f"Choose a nonempty file up to {MAX_MUSIC_BYTES // (1024 * 1024)} MB"
+        )
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        project = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if (
+            project["status"] in BUSY_STATUSES
+            or c.execute("SELECT 1 FROM jobs WHERE status IN ('queued', 'running')").fetchone()
+        ):
+            raise HTTPException(409, "Another job is active. Wait for it to finish.")
+        if len(music_rows(c, pid)) >= 3:
+            raise HTTPException(
+                409, "This project already has three music tracks; choose one of them"
+            )
+        job_id = str(uuid.uuid4())
+        snapshot = {
+            "previous_status": project["status"],
+            "source_url": source_url.strip(),
+            "license_name": license_name.strip(),
+            "uploaded_name": Path(track.filename).name[:160],
+        }
+        c.execute(
+            "INSERT INTO jobs (id, project_id, stage, status, snapshot_json) VALUES (?, ?, 'music-import', 'running', ?)",
+            (job_id, pid, json.dumps(snapshot)),
+        )
+        c.execute("UPDATE projects SET status='importing_music', error='' WHERE id=?", (pid,))
+    try:
+        folder = OUTPUT / pid / "music" / job_id
+        media.disk_guard(
+            OUTPUT.parent / "temp", reserve=len(data) + 40 * 1024**2, extra_folder=folder.parent
+        )
+        folder.mkdir(parents=True)
+        source = folder / ("original" + suffix)
+        source.write_bytes(data)
+        start_worker(music_import_worker, (pid, job_id, source, snapshot))
+    except (OSError, RuntimeError) as exc:
+        message = (
+            str(exc)
+            if isinstance(exc, media.MediaError)
+            else "Cannot start music import. Check disk space and restart the app."
+        )
+        fail_music_import(pid, job_id, snapshot["previous_status"], message)
+        raise HTTPException(503, message)
+    return {"id": pid, "job_id": job_id, "status": "running"}
+
+
 def start_worker(target, args):
     threading.Thread(target=target, args=args, daemon=True).start()
 
@@ -661,6 +905,12 @@ def render_worker(pid: str, job_id: str):
             if not path.is_file():
                 raise media.MediaError(
                     "A selected image is missing. Restore it or upload another image."
+                )
+        if snapshot.get("music"):
+            path = music_path(pid, snapshot["music"])
+            if media.digest(path) != snapshot["music"]["checksum"]:
+                raise media.MediaError(
+                    "The selected music changed on disk. Import it again before rendering."
                 )
         info = media.render(
             snapshot,
@@ -691,6 +941,28 @@ def render_worker(pid: str, job_id: str):
             **snapshot,
             **info,
             "images": provenance,
+            "music": (
+                {
+                    key: snapshot["music"][key]
+                    for key in (
+                        "id",
+                        "uploaded_name",
+                        "source_url",
+                        "license_name",
+                        "checksum",
+                        "original_checksum",
+                        "duration_ms",
+                    )
+                }
+                | {
+                    "file": "music.wav",
+                    "mix_file": "mixed.wav",
+                    "gain_db": snapshot["music_gain_db"],
+                    "ducking": "voice sidechain, threshold 0.025, ratio 8, attack 15ms, release 350ms",
+                }
+            )
+            if snapshot.get("music")
+            else None,
             "disclosure": "AI-generated voice narration",
             "voice_source": media.VOICE_SOURCE
             if info["voice"].startswith("en_US-ljspeech-")
@@ -742,6 +1014,23 @@ def render_worker(pid: str, job_id: str):
                 "Uses the licenses listed in this manifest",
             ),
         ]
+        if snapshot.get("music"):
+            generated_assets.extend(
+                [
+                    (
+                        "music-export",
+                        folder / "music.wav",
+                        snapshot["music"]["source_url"],
+                        snapshot["music"]["license_name"],
+                    ),
+                    (
+                        "audio-mix",
+                        folder / "mixed.wav",
+                        "Local narration and licensed music mix",
+                        "Uses the voice and music licenses listed in this manifest",
+                    ),
+                ]
+            )
         export_manifest["asset_checksums"] = {
             path.name: media.digest(path) for _, path, _, _ in generated_assets
         }
@@ -761,7 +1050,7 @@ def render_worker(pid: str, job_id: str):
                     ),
                 )
             c.execute(
-                "INSERT INTO exports (id, project_id, job_id, script_version, image_revision, quality, file_path, width, height, duration_ms, checksum, pipeline_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO exports (id, project_id, job_id, script_version, image_revision, quality, file_path, width, height, duration_ms, checksum, pipeline_signature, music_revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     pid,
@@ -775,6 +1064,7 @@ def render_worker(pid: str, job_id: str):
                     info["duration_ms"],
                     info["sha256"],
                     snapshot["pipeline_signature"],
+                    snapshot["music_revision"],
                 ),
             )
             c.execute(
@@ -825,13 +1115,14 @@ def render(pid: str, payload: RenderSettings | None = None):
         ):
             raise HTTPException(409, "Approve the current script before rendering")
         previous = c.execute(
-            "SELECT * FROM exports WHERE project_id=? AND script_version=? AND image_revision=? AND quality=? AND pipeline_signature=? ORDER BY rowid DESC LIMIT 1",
+            "SELECT * FROM exports WHERE project_id=? AND script_version=? AND image_revision=? AND quality=? AND pipeline_signature=? AND music_revision=? ORDER BY rowid DESC LIMIT 1",
             (
                 pid,
                 project["script_version"],
                 project["image_revision"],
                 quality,
                 pipeline_signature,
+                project["music_revision"],
             ),
         ).fetchone()
         if previous and Path(previous["file_path"]).is_file():
@@ -856,6 +1147,15 @@ def render(pid: str, payload: RenderSettings | None = None):
             raise HTTPException(
                 409, "Upload images or choose placeholders; keep at least one scene included"
             )
+        project["music"] = None
+        if project["music_enabled"]:
+            project["music"] = next(
+                (row for row in music_rows(c, pid) if row["id"] == project["music_asset_id"]), None
+            )
+            if not project["music"]:
+                raise HTTPException(
+                    409, "The selected music is missing. Import or disable it before rendering."
+                )
         project["quality"] = quality
         project["pipeline_signature"] = pipeline_signature
         job_id = str(uuid.uuid4())
@@ -927,8 +1227,13 @@ def current_export(pid):
         raise HTTPException(409, "Render the approved version first")
     with connection() as c:
         row = c.execute(
-            "SELECT * FROM exports WHERE project_id=? AND script_version=? AND image_revision=? ORDER BY rowid DESC LIMIT 1",
-            (pid, project["approved_version"], project["image_revision"]),
+            "SELECT * FROM exports WHERE project_id=? AND script_version=? AND image_revision=? AND music_revision=? ORDER BY rowid DESC LIMIT 1",
+            (
+                pid,
+                project["approved_version"],
+                project["image_revision"],
+                project["music_revision"],
+            ),
         ).fetchone()
     if not row:
         raise HTTPException(404, "Video is not ready")
@@ -1012,6 +1317,7 @@ def upload_drive(pid: str):
         if (
             current["approved_version"] != export["script_version"]
             or current["image_revision"] != export["image_revision"]
+            or current["music_revision"] != export["music_revision"]
         ):
             raise HTTPException(409, "Project changed. Render the current version first.")
         job_id = str(uuid.uuid4())

@@ -28,3 +28,7 @@ FastAPI/Starlette, Pydantic, Requests, Pillow, uvicorn, python-multipart and dot
 retain their upstream licenses. httpx is used only by developer API tests.
 
 Ruff 0.17.1 (MIT) is a developer-only dependency for lint and formatting checks.
+
+Music regression fixtures are generated locally from sine waves by scripts/smoke-music.py.
+No downloaded music, new runtime dependency or third-party soundtrack is bundled.
+User imports retain their own license and any attribution requirements in export.json.

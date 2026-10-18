@@ -267,6 +267,147 @@ def scene_filter(width, height, count, motion):
     )
 
 
+MUSIC_FORMATS = {".wav": "wav", ".mp3": "mp3", ".flac": "flac"}
+
+
+def normalize_music(source, destination, max_bytes):
+    """Decode a bounded local audio file; never follow playlists or network inputs."""
+    if source.suffix.lower() not in MUSIC_FORMATS:
+        raise MediaError("Choose a WAV, MP3 or FLAC music file.")
+    demuxer = MUSIC_FORMATS[source.suffix.lower()]
+    metadata = json.loads(
+        run(
+            [
+                executable("ffprobe"),
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+                "-f",
+                demuxer,
+                "-show_streams",
+                "-show_format",
+                "-of",
+                "json",
+                str(source),
+            ],
+            timeout=30,
+        )
+    )
+    audio = [
+        stream for stream in metadata.get("streams", []) if stream.get("codec_type") == "audio"
+    ]
+    duration = float(metadata.get("format", {}).get("duration", 0))
+    if (
+        len(audio) != 1
+        or not 1 <= duration <= 300
+        or audio[0].get("channels") not in (1, 2)
+        or not 8000 <= int(audio[0].get("sample_rate", 0)) <= 192000
+    ):
+        raise MediaError("Music must be 1–300 seconds, mono or stereo, at 8–192 kHz.")
+    run(
+        [
+            executable("ffmpeg"),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-f",
+            demuxer,
+            "-i",
+            str(source),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-map_metadata",
+            "-1",
+            "-af",
+            "loudnorm=I=-18:TP=-6:LRA=7",
+            "-ar",
+            "32000",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            "-t",
+            "301",
+            "-fs",
+            str(min(max_bytes, 40 * 1024**2)),
+            str(destination),
+        ],
+        timeout=120,
+    )
+    actual = float(probe(destination)["format"]["duration"])
+    if not 1 <= actual <= 300.1 or abs(actual - duration) > 0.25:
+        raise MediaError(
+            "Music decoding ended early or exceeds the duration limit. Try a shorter file."
+        )
+    return round(actual * 1000)
+
+
+def music_filter(duration, gain_db, voice_channels):
+    if not math.isfinite(gain_db) or not -30 <= gain_db <= -6:
+        raise MediaError("Music level must be between -30 and -6 dB.")
+    if not 0.2 <= duration <= 180 or voice_channels not in (1, 2):
+        raise MediaError("Invalid narration audio for music mixing.")
+    voice = "pan=stereo|c0=c0|c1=c0," if voice_channels == 1 else ""
+    fade = min(1.0, duration / 4)
+    return (
+        f"[0:a]{voice}aresample=48000,asplit=2[voice][key];"
+        f"[1:a]aresample=48000,atrim=duration={duration:.6f},asetpts=PTS-STARTPTS,"
+        f"volume={gain_db:.3f}dB,afade=t=in:d={fade:.6f},"
+        f"afade=t=out:st={duration - fade:.6f}:d={fade:.6f}[bed];"
+        "[bed][key]sidechaincompress=threshold=0.025:ratio=8:attack=15:release=350[ducked];"
+        "[voice][ducked]amix=inputs=2:duration=first:normalize=0,"
+        "alimiter=limit=0.85:level=false:latency=true[out]"
+    )
+
+
+def mix_music(voice, music, destination, duration, gain_db, max_bytes):
+    voice_audio = next(
+        stream for stream in probe(voice)["streams"] if stream["codec_type"] == "audio"
+    )
+    run(
+        [
+            executable("ffmpeg"),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(voice),
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(music),
+            "-filter_complex",
+            music_filter(duration, gain_db, voice_audio["channels"]),
+            "-filter_complex_threads",
+            "1",
+            "-map",
+            "[out]",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            "-t",
+            str(duration),
+            "-fs",
+            str(max_bytes),
+            str(destination),
+        ],
+        timeout=120,
+    )
+    if abs(float(probe(destination)["format"]["duration"]) - duration) > 0.1:
+        raise MediaError("Music mixing ended early. Check the disk budget and retry.")
+
+
 def render(snapshot, images, export_folder, scratch, progress):
     missing = [key for key, available in readiness().items() if not available]
     if missing:
@@ -289,6 +430,22 @@ def render(snapshot, images, export_folder, scratch, progress):
         raise MediaError(
             "Narration must be between 0.2 and 180 seconds. Shorten the script and approve again."
         )
+    soundtrack = voice
+    music = snapshot.get("music")
+    if music:
+        progress("music-mix", 18)
+        copy = export_folder / "music.wav"
+        shutil.copyfile(music["local_path"], copy)
+        soundtrack = export_folder / "mixed.wav"
+        mix_music(
+            voice,
+            copy,
+            soundtrack,
+            duration,
+            snapshot["music_gain_db"],
+            disk_guard(scratch.parent, extra_folder=export_folder),
+        )
+        disk_guard(scratch.parent, extra_folder=export_folder)
     scenes = snapshot.get("scenes")
     if scenes is None:
         # Compatibility for direct callers without a persisted scene plan.
@@ -408,7 +565,7 @@ def render(snapshot, images, export_folder, scratch, progress):
             "-i",
             "concat.txt",
             "-i",
-            str(voice),
+            str(soundtrack),
             "-map",
             "0:v:0",
             "-map",
@@ -434,7 +591,7 @@ def render(snapshot, images, export_folder, scratch, progress):
             "-b:a",
             "160k",
             "-af",
-            "alimiter=limit=0.85:level=false",
+            "alimiter=limit=0.85:level=false:latency=true",
             "-t",
             str(duration),
             "-fs",
