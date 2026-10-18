@@ -22,8 +22,7 @@ They are not installed or end-to-end tested in this checkpoint. Captions, motion
 Ollama. Drive is optional and requires the user's OAuth authorization.
 
 Run one server process on localhost only. No paid services or cloud rendering.
-The workspace lies inside OneDrive; local-only serving does not disable any existing
-OneDrive file synchronization. Store private projects in a nonsynced folder if needed.
+Project data is stored beside the app. Use a folder with appropriate privacy and backup settings.
 
 Do not commit .env, project data, images, audio, video, voice weights or OAuth files.
 The included MIT license covers project code, not third-party tools/models/assets.

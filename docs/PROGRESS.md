@@ -46,3 +46,9 @@ upload job locking is implemented. No media cleanup is performed.
 Next testable milestone: install/review media dependencies, render a short reviewed
 manual narration with explicitly selected placeholders, ffprobe and watch the result,
 then build captions and durable export/job records before expanding automation.
+
+## Workspace relocation — 2026-10-18
+
+Active development folder: D:\SelahFrame. Git history, local data and source copied
+with 92 matching file hashes. Recreated .venv on D: and all 12 regression tests passed
+there (1.368 seconds). Original C: copy is retained as a backup.
