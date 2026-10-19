@@ -16,6 +16,7 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -68,6 +69,7 @@ async def lifespan(application):
 
 app = FastAPI(title="SelahFrame", version="0.4.0", lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+app.mount("/static", StaticFiles(directory=ROOT / "app" / "static"), name="static")
 
 
 @app.middleware("http")

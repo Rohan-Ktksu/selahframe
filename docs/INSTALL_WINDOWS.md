@@ -104,7 +104,7 @@ It never approves user drafts or uploads anything to an external service.
 
 ## Optional music and regression
 
-In section 4, import a local WAV, MP3 or FLAC, record the source/license and confirm
+In the Audio tab, import a local WAV, MP3 or FLAC, record the source/license and confirm
 permission. Preview the imported track, enable it, choose a background level and
 save. Render again to apply changes. Imports always start with music off. Short
 tracks loop to fit the voice; fades and speech ducking are automatic. All original

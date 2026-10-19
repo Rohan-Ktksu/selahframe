@@ -1,3 +1,49 @@
+# Sage Workspace UI — 2026-10-19
+
+User chose the third proposed theme, Sage Workspace. Implemented in D:\SelahFrame.
+
+- Replaced the long dark form with soft sage surfaces, green controls, a project
+  library/search, a new-project dialog and five focused editor tabs.
+- Added a persistent desktop preview, scene sequence with real thumbnails/estimated
+  times, responsive phone layout, readable source details and compact audio controls.
+- Preserved all existing project, provenance, script/approval, scene, music, render,
+  download and Drive API behavior. No new frontend package, remote font or CDN is used.
+- Local CSS/JavaScript are served by FastAPI StaticFiles. Removed raw JSON status from
+  the main workflow; users see named job stages, progress and actionable messages.
+- Saved versus unsaved state is visible. Project switching protects unsaved edits;
+  render/archive controls require saved changes and exact narration approval. Local
+  in-flight changes lock related controls. Older polling responses cannot replace a
+  newer edit. Unavailable Ollama/Drive actions explain their setup requirements.
+- Keyboard tab navigation, input labels, native dialogs, focus rings, reduced motion,
+  mobile touch targets and auto-sized narration are included.
+
+Validation:
+
+- All 51 existing backend/API/media tests passed (8.294s) after static serving changed.
+- Controller syntax, Ruff lint/format and markup checks passed. The page has 145 unique
+  IDs and both UI assets return the proper HTTP content types.
+- Browser-created a project, saved/approved only a fixed technical narration, uploaded
+  original geometric artwork and imported an original local sine chord through the UI.
+  Imported music remained OFF until explicitly enabled. No user draft was approved.
+- Browser changed order/weights/motion and music volume, saved and rendered 1080p.
+  Export: 18.52s, H.264/AAC, scene weights [1,2], second scene zoom_out, music -20dB.
+  All generated media checksums and HTTP 206/1024-byte download verified.
+- Narration layout fit checked phone (345px content), tablet (768px) and desktop
+  (1024px) frame widths with no horizontal overflow or clipped visible controls.
+- Browser search worked. Attempting to switch projects with unsaved narration was
+  rejected; returning to Studio preserved the text, and Reload restored the saved
+  version. Existing approval and media records remained intact.
+- Demo project: bb723818-8b32-449b-bc6b-9cb4c7115c6f.
+  Evidence: ignored temp/sage-ui-evidence.json and temp/sage-workspace.png.
+
+The user's next requested review concerns the highlighted music/import commit. The
+screenshot contains the commit title and a successful check, not a failure message;
+asked which observed behavior needs reproducing. No unrelated feature was guessed.
+Ollama/real Drive authorization and subjective listening review remain pending.
+The user still controls GitHub pushes.
+
+---
+
 # Optional music milestone — 2026-10-19
 
 Active checkout: D:\SelahFrame. The user controls GitHub pushes.

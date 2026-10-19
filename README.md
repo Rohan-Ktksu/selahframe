@@ -45,3 +45,9 @@ The default is narration only. Music loops to the measured narration length, fad
 at both ends and is ducked beneath speech. Up to three tracks per project are kept,
 along with their originals. Music changes retain script approval and require a new
 export. No third-party music is downloaded or included in the source package.
+
+Sage Workspace interface: browse/search saved projects, create a project in the
+source dialog, then use Passage, Narration, Scenes, Audio and Export tabs. The
+portrait preview stays beside the editor on desktop and stacks below it on phones.
+Unsaved changes are shown and protected when switching projects. The interface uses
+only local CSS and JavaScript; no frontend build tools or external fonts are required.

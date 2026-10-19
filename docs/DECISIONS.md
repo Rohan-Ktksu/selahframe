@@ -63,3 +63,16 @@
 - Filter reference: https://ffmpeg.org/ffmpeg-filters.html#sidechaincompress.
   A deterministic tone projection checks actual ducking independently of the filter
   expression. No claim of subjective listening quality follows from that measurement.
+
+## Sage Workspace interface
+
+- User selected Sage Workspace from the four-theme comparison. Apply its light green
+  palette and horizontal workflow navigation to the real local application.
+- Keep the vanilla frontend and existing FastAPI/SQLite media workflow. Use local
+  static assets, with no frontend build step, CDN requirement or new package.
+- Use a project library and dedicated source/narration/scenes/audio/export panels;
+  preview and render progress remain visible alongside the editor on desktop.
+- Keep immutable project source metadata readable. Narration approval remains an
+  explicit API action. Never save/approve changes merely by navigating or rendering.
+- Protect unsaved edits and ignore stale polling responses. Format errors and stages
+  for people instead of presenting internal JSON in the main workflow.
