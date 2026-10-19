@@ -51,3 +51,18 @@ source dialog, then use Passage, Narration, Scenes, Audio and Export tabs. The
 portrait preview stays beside the editor on desktop and stacks below it on phones.
 Unsaved changes are shown and protected when switching projects. The interface uses
 only local CSS and JavaScript; no frontend build tools or external fonts are required.
+
+
+Cinematic images: in Scenes, choose the verified passage or saved narration, a scene
+count and optional visual direction. Confirm sending that text to AI Horde, then
+Generate images. This optional community API is free; no personal key is needed.
+Anonymous outputs are shared for dataset improvement. Queue time and model quality
+vary. Cancel is available and each image has a 10-minute timeout. Original outputs,
+cleaned JPEGs, prompts, seeds, model IDs and checksums stay in the project folder.
+You can replace the active scene plan while retaining earlier files. Enable automatic
+rendering only after approving the exact narration; it uses the Export tab's quality.
+There is no paid fallback. See [provider research](docs/IMAGE_PROVIDERS.md).
+
+Music defaults to 24 dB below measured narration volume, with additional speech
+ducking. Older louder settings are lowered once; previous exports remain on disk.
+Render again after saving audio edits to hear the new balance.

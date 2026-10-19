@@ -2094,3 +2094,7 @@ dialog::backdrop {
     scroll-behavior: auto!important;
   }
 }
+
+.cinematic-source { max-height: 140px; overflow-y: auto; padding: 12px; background: var(--bg, #edf2ee); border-radius: 10px; }
+#cinematicDirection { min-height: 88px; width: 100%; }
+#cinematicControls .check-row { margin: 16px 0; }

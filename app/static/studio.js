@@ -83,8 +83,8 @@ async function perform(key, task, success) {
 }
 
 function hasChanges() { return state.scriptDirty || state.sceneDirty || state.musicDirty; }
-function changingProject() { return ["script", "approve", "draft", "scenes", "music", "image", "import", "render", "drive"].some(key => state.pending.has(key)); }
-function isBusy() { return ["rendering", "uploading", "importing_music"].includes(state.project?.status); }
+function changingProject() { return ["script", "approve", "draft", "scenes", "music", "image", "import", "render", "drive", "cinematic"].some(key => state.pending.has(key)); }
+function isBusy() { return ["rendering", "uploading", "importing_music", "generating_images"].includes(state.project?.status); }
 function isApproved() { return !!state.project?.approved_version && state.project.approved_version === state.project.script_version; }
 function mediaReady() { return ["ffmpeg", "ffprobe", "piper", "voice_model"].every(key => state.health?.components[key]); }
 function seconds(ms) { return (ms / 1000).toFixed(1) + "s"; }
@@ -93,7 +93,7 @@ function musicEdits() { return {asset_id: $("musicTrack").value || null, enabled
 
 function badgeStatus(status) {
   return ({draft: "Draft", review: "Needs review", approved: "Script approved", complete: "Video ready",
-    failed: "Needs attention", rendering: "Rendering", uploading: "Archiving", importing_music: "Importing music"})[status] || "Draft";
+    failed: "Needs attention", rendering: "Rendering", uploading: "Archiving", importing_music: "Importing music", generating_images: "Creating images"})[status] || "Draft";
 }
 
 function showLibrary() {
@@ -250,12 +250,12 @@ function drawScenes() {
     const thumb = element("div", "scene-thumbnail");
     const image = element("img");
     image.src = scene.thumbnail_url;
-    image.alt = scene.placeholder ? "Abstract placeholder" : `Uploaded scene ${index + 1}`;
+    image.alt = scene.placeholder ? "Abstract placeholder" : `${scene.generated ? "AI-generated" : "Uploaded"} scene ${index + 1}`;
     image.loading = "lazy";
     thumb.append(image, element("span", "scene-number", String(index + 1).padStart(2, "0")));
     const settings = element("div", "scene-settings");
     const heading = element("h3", "", `Scene ${index + 1}`);
-    if (scene.placeholder) heading.appendChild(element("span", "placeholder-tag", "Abstract"));
+    if (scene.placeholder || scene.generated) heading.appendChild(element("span", "placeholder-tag", scene.placeholder ? "Abstract" : "AI generated"));
     const motionLabel = element("label", "", "Camera movement");
     const motion = element("select");
     motion.setAttribute("aria-label", `Scene ${index + 1} motion`);
@@ -387,7 +387,7 @@ function syncPreview() {
   const first = state.scenes.find(scene => scene.enabled);
   $("previewImage").hidden = !first;
   $("previewLandscape").hidden = !!first;
-  if (first) { $("previewImage").src = first.thumbnail_url; $("previewImage").alt = first.placeholder ? "Abstract placeholder scene" : "First included uploaded scene"; }
+  if (first) { $("previewImage").src = first.thumbnail_url; $("previewImage").alt = first.placeholder ? "Abstract placeholder scene" : "First included scene image"; }
   $("download").hidden = !ready;
   if (ready) $("download").href = `${base}/${encodeURIComponent(project.id)}/download`;
   else $("download").removeAttribute("href");
@@ -398,7 +398,7 @@ function syncPreview() {
   $("jobCard").hidden = !active;
   if (active) {
     const labels = {preflight: "Preparing your video", voice: "Creating narration", scenes: "Building scenes", captions: "Adding captions", verify: "Checking your export", "music-mix": "Mixing the soundtrack", "music-import": "Preparing your track", drive: "Archiving to Drive", "drive-verify": "Verifying the archive"};
-    $("stage").textContent = labels[project.job.stage] || "Working on your project";
+    $("stage").textContent = labels[project.job.stage] || (project.job.stage.startsWith("Images") ? project.job.stage : "Working on your project");
     $("progress").value = project.job.progress;
     $("progressValue").textContent = project.job.progress + "%";
   }
@@ -433,6 +433,15 @@ function syncControls() {
   const canRender = !busy && !changingProject() && !hasChanges() && isApproved() && validScenes && mediaReady();
   $("renderVideo").disabled = !canRender || pending.has("render");
   $("quality").disabled = busy;
+  $("cinematicControls").disabled = busy || switching || pending.has("cinematic");
+  $("generateImages").disabled = busy || hasChanges() || pending.has("cinematic");
+  $("cancelImages").hidden = project.status !== "generating_images";
+  $("cancelImages").disabled = pending.has("cancelImages");
+  $("cinematicRender").disabled = !isApproved() || state.scriptDirty;
+  if (!isApproved()) $("cinematicRender").checked = false;
+  $("cinematicText").textContent = $("cinematicSource").value === "verse" ? project.scripture : project.script || "Save narration first.";
+  $("cinematicHint").textContent = hasChanges() ? "Save your edits before generating images." : "No payment or personal API key required. No paid fallback. Each image may take up to 10 minutes.";
+
   $("renderHint").textContent = busy ? "A job is already running. Your progress is shown beside the preview." : hasChanges() ? "Save all edits before rendering. Narration changes also need your approval." : !isApproved() ? "Review and approve your saved narration to continue." : !validScenes ? "Include at least one scene in your video." : !mediaReady() ? "Local video tools need setup. Check Project details below." : "Everything is ready. Render the saved project when you’re happy with it.";
   const checks = [[true, "Verified passage recorded", "passage"], [isApproved() && !state.scriptDirty, "Narration approved", "narration"], [validScenes && !state.sceneDirty, "Scene plan saved", "scenes"]];
   if (state.music?.enabled || state.musicDirty) checks.push([!state.musicDirty, "Music settings saved", "audio"]);
@@ -597,6 +606,19 @@ async function uploadDrive() {
   await refreshProject(true);
 }
 
+async function generateImages() {
+  if (hasChanges()) throw Error("Save all edits before generating images.");
+  if (!$("cinematicConsent").checked) throw Error("Confirm sending the selected text to AI Horde first.");
+  await api(route("/cinematic"), "POST", {
+    source: $("cinematicSource").value, count: Number($("cinematicCount").value),
+    direction: $("cinematicDirection").value, image_revision: state.sceneRevision,
+    script_version: state.scriptVersion, consent: true, replace_plan: $("cinematicReplace").checked,
+    render_after: $("cinematicRender").checked, quality: $("quality").value,
+  });
+  $("cinematicConsent").checked = false;
+  await refreshProject(true);
+}
+
 async function loadHealth() {
   state.health = await api("/api/health");
   const missing = ["ffmpeg", "ffprobe", "piper", "voice_model"].filter(key => !state.health.components[key]);
@@ -637,6 +659,9 @@ $("saveScenes").addEventListener("click", () => perform("scenes", saveScenes, "S
 $("reloadScenes").addEventListener("click", () => perform("scenes", async () => { applyScenePlan(await api(route("/scenes"))); await refreshProject(true); }));
 $("imageForm").addEventListener("submit", event => { event.preventDefault(); perform("image", uploadImage, "Image added to your scene plan."); });
 ["musicTrack", "musicEnabled"].forEach(id => $(id).addEventListener("change", musicChanged));
+$("cinematicForm").addEventListener("submit", event => { event.preventDefault(); perform("cinematic", generateImages, "Image generation started. You can follow the queue beside the preview."); });
+$("cinematicSource").addEventListener("change", syncControls);
+$("cancelImages").addEventListener("click", () => perform("cancelImages", async () => { await api(route("/cinematic/cancel"), "POST"); await refreshProject(true); }, "Image generation cancelled. Your previous scene plan is retained."));
 $("musicGain").addEventListener("input", musicChanged);
 $("saveMusic").addEventListener("click", () => perform("music", saveMusic, "Music settings saved. Render to apply them."));
 $("reloadMusic").addEventListener("click", () => perform("music", async () => { applyMusicPlan(await api(route("/music"))); await refreshProject(true); }));

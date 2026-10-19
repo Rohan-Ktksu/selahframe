@@ -732,6 +732,135 @@ class AppTests(unittest.TestCase):
         m.initialize()
         self.assertEqual(self.client.get(self.url).json()["music_revision"], 1)
 
+    def image_request(self, **changes):
+        project = self.client.get(self.url).json()
+        payload = {
+            "image_revision": project["image_revision"],
+            "script_version": project["script_version"],
+            "consent": True,
+            "count": 1,
+        }
+        payload.update(changes)
+        return self.client.post(self.url + "/cinematic", json=payload)
+
+    def test_images_require_consent_current_version_and_approved_autorender(self):
+        self.assertEqual(self.image_request(consent=False).status_code, 400)
+        self.assertEqual(self.image_request(image_revision=99).status_code, 409)
+        self.assertEqual(self.image_request(render_after=True).status_code, 409)
+        self.assertEqual(self.image_request(source="narration").status_code, 400)
+
+    def test_image_generation_claims_global_lock_and_cancellation_restores_project(self):
+        self.approve()
+        with patch.object(m, "start_worker"):
+            result = self.image_request()
+            self.assertEqual(result.status_code, 202)
+            self.assertEqual(self.client.get(self.url).json()["status"], "generating_images")
+            self.assertEqual(self.client.post(self.url + "/render").status_code, 409)
+            self.assertEqual(self.image_request().status_code, 409)
+            self.assertEqual(
+                self.client.put(
+                    self.url + "/script", json={"script": "Cannot edit during generation"}
+                ).status_code,
+                409,
+            )
+        self.assertEqual(self.client.post(self.url + "/cinematic/cancel").status_code, 200)
+        self.assertEqual(self.client.get(self.url).json()["status"], "approved")
+        self.assertEqual(
+            self.client.get("/api/v1/jobs/" + result.json()["job_id"]).json()["status"], "cancelled"
+        )
+
+    def test_image_success_saves_real_assets_provenance_and_renders_only_approved_script(self):
+        self.approve()
+        with patch.object(m, "start_worker") as worker:
+            result = self.image_request(replace_plan=True, render_after=True)
+        data = io.BytesIO()
+        Image.new("RGB", (32, 48), "green").save(data, "JPEG")
+        with (
+            patch.object(
+                m.cinematic,
+                "request_image",
+                return_value=(
+                    data.getvalue(),
+                    data.getvalue(),
+                    {"model": "stable_diffusion", "seed": "7", "generation_id": "fixture"},
+                ),
+            ),
+            patch.object(m, "render") as render,
+        ):
+            target, args = worker.call_args.args
+            target(*args)
+        render.assert_called_once()
+        project = self.client.get(self.url).json()
+        self.assertEqual(project["approved_version"], 1)
+        self.assertEqual(project["image_revision"], 1)
+        plan = self.client.get(self.url + "/scenes").json()
+        self.assertEqual(len(plan["scenes"]), 1)
+        self.assertFalse(plan["scenes"][0]["placeholder"])
+        self.assertTrue(plan["scenes"][0]["generated"])
+        self.assertEqual(self.client.get(plan["scenes"][0]["thumbnail_url"]).status_code, 200)
+        receipt = list((m.OUTPUT / self.pid / "images" / "generated").glob("*/provenance.json"))[0]
+        self.assertEqual(json.loads(receipt.read_text())["records"][0]["seed"], "7")
+        self.assertEqual(
+            self.client.get("/api/v1/jobs/" + result.json()["job_id"]).json()["status"], "complete"
+        )
+
+    def test_cancelled_image_worker_cannot_apply_assets_late(self):
+        with patch.object(m, "start_worker") as worker:
+            self.image_request()
+        self.client.post(self.url + "/cinematic/cancel")
+        with patch.object(m.cinematic, "request_image", side_effect=m.cinematic.Cancelled()):
+            target, args = worker.call_args.args
+            target(*args)
+        self.assertEqual(self.client.get(self.url).json()["image_revision"], 0)
+
+    def test_image_failure_and_start_failure_keep_previous_plan(self):
+        with patch.object(m, "start_worker", side_effect=RuntimeError()):
+            self.assertEqual(self.image_request().status_code, 503)
+        self.assertEqual(self.client.get(self.url).json()["status"], "draft")
+        with patch.object(m, "start_worker") as worker:
+            self.image_request()
+        with patch.object(
+            m.cinematic, "request_image", side_effect=m.cinematic.ImageError("Queue timed out")
+        ):
+            target, args = worker.call_args.args
+            target(*args)
+        self.assertEqual(len(self.client.get(self.url + "/scenes").json()["scenes"]), 6)
+        self.assertEqual(self.client.get(self.url).json()["image_revision"], 0)
+
+    def test_restart_recovers_image_job_without_approving_narration(self):
+        with patch.object(m, "start_worker"):
+            self.image_request()
+        m.initialize()
+        project = self.client.get(self.url).json()
+        self.assertEqual(project["status"], "draft")
+        self.assertIsNone(project["approved_version"])
+        self.assertEqual(project["job"]["status"], "failed")
+
+    def test_partial_image_failure_retains_original_plan_and_downloaded_file(self):
+        with patch.object(m, "start_worker") as worker:
+            self.image_request(count=2, replace_plan=True)
+        data = io.BytesIO()
+        Image.new("RGB", (32, 48), "green").save(data, "JPEG")
+        fixture = (
+            data.getvalue(),
+            data.getvalue(),
+            {"model": "stable_diffusion", "seed": "7", "generation_id": "fixture"},
+        )
+        with patch.object(
+            m.cinematic,
+            "request_image",
+            side_effect=[fixture, m.cinematic.ImageError("Queue timeout")],
+        ):
+            target, args = worker.call_args.args
+            target(*args)
+        self.assertEqual(len(self.client.get(self.url + "/scenes").json()["scenes"]), 6)
+        self.assertEqual(self.client.get(self.url).json()["image_revision"], 0)
+        self.assertTrue(list((m.OUTPUT / self.pid / "images" / "generated").glob("*/scene-01.jpg")))
+        checkpoint = list((m.OUTPUT / self.pid / "images" / "generated").glob("*/provenance.json"))[
+            0
+        ]
+        self.assertEqual(len(json.loads(checkpoint.read_text())["records"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

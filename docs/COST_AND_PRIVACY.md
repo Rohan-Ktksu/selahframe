@@ -18,3 +18,12 @@ it to a network interface without a separate authentication/security review.
 Google OAuth lives in rclone's user config outside the repository. Never share it.
 The app queues copies to the existing consumer Drive, verifies names and sizes, and
 retains local files. No credentialed Drive integration has been exercised yet.
+
+
+Optional cinematic generation sends the selected saved passage/narration and visual
+direction to AI Horde's volunteer network only after explicit confirmation in Scenes.
+Anonymous service outputs are shared for dataset improvement. Do not use it for
+private text. An optional free account key belongs in the local .env file; it is
+never returned to the browser, stored in job snapshots or included in Git. Generated
+assets and receipts are stored locally after retrieval. No paid fallback is configured.
+Normal rendering/TTS still run locally, and manual image uploads remain available.

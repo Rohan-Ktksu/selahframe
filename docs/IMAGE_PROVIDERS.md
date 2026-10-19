@@ -1,6 +1,6 @@
 # Cinematic image providers
 
-Checked 2026-10-19. This is research, not a list of configured providers.
+Checked 2026-10-19. AI Horde is now integrated as an optional free provider; the other entries remain research.
 
 | Provider | Free access | Setup and practical fit |
 | --- | --- | --- |
@@ -23,8 +23,8 @@ code license alone does not establish the rights to every hosted model or output
 - API integration lifecycle:
   https://github.com/Haidra-Org/AI-Horde/blob/main/README_integration.md
 - Read-only live check: GET https://aihorde.net/api/v2/status/models?type=image
-  returned HTTP 200 and available model/worker entries. No image was generated via
-  this API, so latency, output quality and actual anonymous admission remain untested.
+  returned HTTP 200 and available model/worker entries. A later anonymous stable_diffusion request completed successfully and returned a
+  validated 512x768 portrait image; live app testing is recorded in PROGRESS.md.
 - Cloudflare pricing: https://developers.cloudflare.com/workers-ai/platform/pricing/
 - Official Cloudflare image example on GitHub:
   https://github.com/cloudflare/workers-mcp/blob/main/examples/02-image-generation/src/index.ts
@@ -50,7 +50,7 @@ https://developers.google.com/profile/help/benefits
 A signed-in browser can assist with website generation, but this is not a supported
 subscription API integration. Login checks, changed controls, and download access
 can interrupt automation. Do not reuse private website endpoints or extract cookies
-as API credentials. No such connector is currently implemented in SelahFrame.
+as API credentials. A Google browser connector is not implemented in SelahFrame; use the AI Horde API path for app automation.
 
 ## Flow sample generated during research
 

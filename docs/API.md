@@ -76,3 +76,38 @@ receipts in export.json. The voice controls a sidechain compressor; music loops 
 fades while narration duration remains authoritative. Narration and final mix are
 retained separately. These fields record permission supplied by the user; they do
 not independently verify license claims or fulfill attribution obligations.
+
+
+## Cinematic images (AI Horde, optional)
+
+`POST /api/v1/projects/{id}/cinematic` starts a persisted background job. Body:
+`source` (verse/narration), `count` (1–4), `direction` (up to 500 chars),
+`image_revision`, `script_version`, `consent` (must be true), `replace_plan`
+(default false), `render_after` (default false), `quality` (720p/1080p).
+The source text is loaded from this project's saved passage/narration. Optimistic
+versions and the global job lock prevent edits/renders from overlapping generation.
+Automatic rendering requires an already-approved current narration; no script is
+created, altered or automatically approved by this endpoint.
+
+`POST /api/v1/projects/{id}/cinematic/cancel` cancels this project's running image
+job and restores its prior state. The worker discards late results and requests
+remote cancellation. Network operations have their own bounded timeout.
+
+The provider is AI Horde only, with anonymous credentials unless the optional
+server-side AI_HORDE_API_KEY is set. No paid fallback exists. Anonymous outputs
+are shared for dataset improvement under the provider's rules. Prompts go to
+volunteer workers. The explicit consent checkbox covers the selected source and
+direction; do not send private material.
+
+Jobs retain prompts and remote IDs. Original returned image bytes, sanitized JPEGs,
+checksums, model/seed IDs and provenance.json are saved under the project images
+folder. All scenes attach atomically only when the requested batch succeeds;
+failure/cancellation retains the previous plan and earlier exports. Replacing a
+plan retains original files and the earlier plan in the job snapshot. Restart fails
+interrupted jobs explicitly; it never silently resubmits to the remote provider.
+The provider may still finish an in-flight request if the app is forcibly stopped.
+
+Drafts use the stable_diffusion model, 512x768 and 20 steps, with provider downgrade
+allowed for free admission. Images are cropped to 9:16 by the existing renderer.
+Each scene has a 10-minute queue/generation timeout, with explicit cancellation and
+no automatic retry. Queue estimates are provider-wide estimates, not a guarantee.

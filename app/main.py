@@ -21,14 +21,14 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app import media
+from app import cinematic, media
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 Image.MAX_IMAGE_PIXELS = 20_000_000
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "12")) * 1024 * 1024
 MAX_MUSIC_BYTES = int(os.getenv("MAX_MUSIC_MB", "25")) * 1024 * 1024
-BUSY_STATUSES = {"rendering", "uploading", "importing_music"}
+BUSY_STATUSES = {"rendering", "uploading", "importing_music", "generating_images"}
 DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 DB = DATA / "projects.sqlite3"
@@ -67,7 +67,7 @@ async def lifespan(application):
         handle.close()
 
 
-app = FastAPI(title="SelahFrame", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="SelahFrame", version="0.5.0", lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 app.mount("/static", StaticFiles(directory=ROOT / "app" / "static"), name="static")
 
@@ -185,6 +185,14 @@ def initialize():
             previous = json.loads(row["snapshot_json"]).get("previous_status", "approved")
             c.execute(
                 "UPDATE projects SET status=?, error='Music import interrupted. Retry the upload.' WHERE id=? AND status='importing_music'",
+                (previous, row["project_id"]),
+            )
+        for row in c.execute(
+            "SELECT project_id, snapshot_json FROM jobs WHERE status IN ('queued', 'running')"
+        ).fetchall():
+            previous = json.loads(row["snapshot_json"]).get("previous_status", "review")
+            c.execute(
+                "UPDATE projects SET status=?, error='Image generation interrupted. Retry explicitly.' WHERE id=? AND status='generating_images'",
                 (previous, row["project_id"]),
             )
         c.execute("UPDATE projects SET script_version=1 WHERE script_version=0 AND script<>''")
@@ -343,6 +351,12 @@ def health():
         "caption_timing": "approximate",
         "max_concurrent_jobs": 1,
         "max_music_mb": MAX_MUSIC_BYTES // (1024 * 1024),
+        "image_generation": {
+            "provider": "AI Horde",
+            "model": cinematic.MODEL,
+            "anonymous": cinematic.anonymous(),
+            "max_scenes": 4,
+        },
     }
 
 
@@ -567,6 +581,9 @@ def get_scenes(pid: str):
                 "duration_weight": row["duration_weight"],
                 "motion_style": row["motion_style"],
                 "placeholder": row["image_asset_id"] is None,
+                "generated": bool(
+                    row["local_path"] and "generated" in Path(row["local_path"]).parts
+                ),
                 "share": share,
                 "estimated_seconds": round(duration * share / 1000, 2) if duration else None,
                 "source_url": row["source_url"] or "SelahFrame abstract placeholder pack",
@@ -1114,6 +1131,7 @@ def render(pid: str, payload: RenderSettings | None = None):
         if active:
             if (
                 active["project_id"] == pid
+                and project["status"] == "rendering"
                 and active["stage"] != "drive"
                 and json.loads(active["snapshot_json"]).get("quality") == quality
             ):
@@ -1367,6 +1385,256 @@ def drive_status(pid: str):
         "status": project["drive_status"],
         "export": dict(export) if export else None,
     }
+
+
+class CinematicRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    source: Literal["verse", "narration"] = "verse"
+    count: int = Field(default=3, ge=1, le=4)
+    direction: str = Field(default="", max_length=500)
+    image_revision: int = Field(ge=0)
+    script_version: int = Field(ge=0)
+    consent: bool = False
+    replace_plan: bool = False
+    render_after: bool = False
+    quality: Literal["720p", "1080p"] = "720p"
+
+
+def image_job_failed(pid, job_id, previous_status, message):
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        changed = c.execute(
+            "UPDATE jobs SET status='failed', error=?, finished_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'",
+            (message, job_id),
+        ).rowcount
+        if changed:
+            c.execute(
+                "UPDATE projects SET status=?, error=? WHERE id=? AND status='generating_images'",
+                (previous_status, message, pid),
+            )
+
+
+def cinematic_worker(pid, job_id, snapshot):
+    folder = OUTPUT / pid / "images" / "generated" / job_id
+    records = []
+
+    def cancelled():
+        with connection() as c:
+            row = c.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            return not row or row[0] != "running"
+
+    def remember(request_id):
+        snapshot.setdefault("remote_requests", []).append(request_id)
+        with connection() as c:
+            c.execute(
+                "UPDATE jobs SET snapshot_json=? WHERE id=? AND status='running'",
+                (json.dumps(snapshot), job_id),
+            )
+
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        for index, prompt in enumerate(snapshot["prompts"]):
+            media.disk_guard(OUTPUT.parent / "temp", reserve=80 * 1024**2, extra_folder=folder)
+
+            def notify(queue, wait):
+                progress_job(
+                    job_id,
+                    f"Images {index + 1}/{len(snapshot['prompts'])} · queue {queue} · estimate {wait}s",
+                    5 + round(85 * index / len(snapshot["prompts"])),
+                )
+
+            original, cleaned, receipt = cinematic.request_image(
+                prompt, notify, cancelled, remember
+            )
+            if cancelled():
+                raise cinematic.Cancelled()
+            raw = folder / f"scene-{index + 1:02}.original"
+            path = folder / f"scene-{index + 1:02}.jpg"
+            raw.write_bytes(original)
+            path.write_bytes(cleaned)
+            records.append(
+                {
+                    **receipt,
+                    "prompt": prompt,
+                    "filename": path.name,
+                    "original_filename": raw.name,
+                    "original_checksum": media.digest(raw),
+                    "checksum": media.digest(path),
+                }
+            )
+            (folder / "provenance.json").write_text(
+                json.dumps(
+                    {
+                        "provider": "AI Horde",
+                        "anonymous": snapshot["anonymous"],
+                        "source": snapshot["source"],
+                        "script_version": snapshot["script_version"],
+                        "complete": False,
+                        "records": records,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        (folder / "provenance.json").write_text(
+            json.dumps(
+                {
+                    "provider": "AI Horde",
+                    "anonymous": snapshot["anonymous"],
+                    "source": snapshot["source"],
+                    "script_version": snapshot["script_version"],
+                    "records": records,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        with connection() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if (
+                c.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
+                != "running"
+            ):
+                raise cinematic.Cancelled()
+            if (
+                snapshot["replace_plan"]
+                or not c.execute(
+                    "SELECT 1 FROM scenes WHERE project_id=? AND image_asset_id IS NOT NULL", (pid,)
+                ).fetchone()
+            ):
+                c.execute("DELETE FROM scenes WHERE project_id=?", (pid,))
+            idx = c.execute(
+                "SELECT COALESCE(MAX(idx), -1)+1 FROM scenes WHERE project_id=?", (pid,)
+            ).fetchone()[0]
+            for index, record in enumerate(records):
+                asset_id = str(uuid.uuid4())
+                c.execute(
+                    "INSERT INTO assets (id, project_id, type, local_path, source_url, license_name, checksum) VALUES (?, ?, 'image', ?, ?, ?, ?)",
+                    (
+                        asset_id,
+                        pid,
+                        str(folder / record["filename"]),
+                        "https://aihorde.net/ · generation " + record["generation_id"],
+                        "AI-generated; model "
+                        + record["model"]
+                        + "; review model terms before sharing",
+                        record["checksum"],
+                    ),
+                )
+                c.execute(
+                    "INSERT INTO scenes (id, project_id, idx, image_asset_id, motion_style) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()),
+                        pid,
+                        idx + index,
+                        asset_id,
+                        "zoom_in" if index % 2 == 0 else "zoom_out",
+                    ),
+                )
+            mark_visual_edit(c, pid)
+            c.execute(
+                "UPDATE jobs SET status='complete', stage='complete', progress=100, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+        if snapshot["render_after"]:
+            try:
+                render(pid, RenderSettings(quality=snapshot["quality"]))
+            except HTTPException:
+                update_project(
+                    pid,
+                    error="Images are ready. Automatic render could not start; review the project and click Render video.",
+                )
+    except cinematic.Cancelled:
+        return
+    except Exception as exc:
+        message = (
+            str(exc)
+            if isinstance(exc, (cinematic.ImageError, media.MediaError))
+            else "Image generation failed. Your previous scene plan and exports are retained. Retry explicitly."
+        )
+        image_job_failed(pid, job_id, snapshot["previous_status"], message)
+
+
+@app.post("/api/projects/{pid}/cinematic", status_code=202)
+def generate_cinematic(pid: str, payload: CinematicRequest):
+    load_project(pid)
+    if not payload.consent:
+        raise HTTPException(
+            400,
+            "Confirm sending the selected text to AI Horde's volunteer network. Anonymous outputs are shared for dataset improvement.",
+        )
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        project = dict(c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
+        if (
+            project["status"] in BUSY_STATUSES
+            or c.execute("SELECT 1 FROM jobs WHERE status IN ('queued', 'running')").fetchone()
+        ):
+            raise HTTPException(409, "Another job is active. Wait for it to finish.")
+        if (project["image_revision"], project["script_version"]) != (
+            payload.image_revision,
+            payload.script_version,
+        ):
+            raise HTTPException(409, "Project changed. Reload before generating images.")
+        if payload.render_after and (
+            not project["approved_version"]
+            or project["approved_version"] != project["script_version"]
+        ):
+            raise HTTPException(409, "Approve the exact narration before automatic rendering.")
+        count = c.execute(
+            "SELECT COUNT(*) FROM assets WHERE project_id=? AND type='image'", (pid,)
+        ).fetchone()[0]
+        if count + payload.count > 24:
+            raise HTTPException(
+                409, "This project would exceed 24 saved images. Start another project."
+            )
+        text = project["scripture"] if payload.source == "verse" else project["script"]
+        if not text.strip() or len(text) > 6000:
+            raise HTTPException(400, "Save a passage or narration of up to 6000 characters first.")
+        job_id = str(uuid.uuid4())
+        snapshot = {
+            **payload.model_dump(),
+            "previous_status": project["status"],
+            "anonymous": cinematic.anonymous(),
+            "prompts": cinematic.prompts(text, payload.count, payload.direction),
+            "previous_scenes": scene_rows(c, pid),
+        }
+        c.execute(
+            "INSERT INTO jobs (id, project_id, stage, status, snapshot_json) VALUES (?, ?, 'Images: preparing', 'running', ?)",
+            (job_id, pid, json.dumps(snapshot)),
+        )
+        c.execute("UPDATE projects SET status='generating_images', error='' WHERE id=?", (pid,))
+    try:
+        start_worker(cinematic_worker, (pid, job_id, snapshot))
+    except RuntimeError:
+        image_job_failed(
+            pid,
+            job_id,
+            snapshot["previous_status"],
+            "Cannot start image worker. Restart SelahFrame and retry.",
+        )
+        raise HTTPException(503, "Cannot start image worker. Restart SelahFrame and retry.")
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/api/projects/{pid}/cinematic/cancel")
+def cancel_cinematic(pid: str):
+    load_project(pid)
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        job = c.execute(
+            "SELECT * FROM jobs WHERE project_id=? AND status='running' ORDER BY rowid DESC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        if not job or not job["stage"].startswith("Images"):
+            raise HTTPException(409, "No image generation is running for this project.")
+        previous = json.loads(job["snapshot_json"])["previous_status"]
+        c.execute(
+            "UPDATE jobs SET status='cancelled', stage='cancelled', finished_at=CURRENT_TIMESTAMP WHERE id=?",
+            (job["id"],),
+        )
+        c.execute("UPDATE projects SET status=?, error='' WHERE id=?", (previous, pid))
+    return {"status": "cancelled"}
 
 
 # Versioned API, with legacy dashboard routes retained during migration.

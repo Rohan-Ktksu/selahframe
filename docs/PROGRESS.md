@@ -1,3 +1,51 @@
+# Free AI Horde image generation — 2026-10-19
+
+- User selected AI Horde before any paid service. Added an optional AI Horde adapter;
+  no account/key required for anonymous use, no paid fallback, no new dependencies.
+- Scenes now offers passage/saved narration, 1–4 images, optional visual direction,
+  explicit network/data-sharing confirmation, scene-plan replacement retaining old
+  files, queue progress and cancellation. Generated scene cards are labeled.
+- Optional automatic rendering requires the already-approved current narration and
+  uses the selected export quality. It never edits or approves a script.
+- Documented API/privacy/terms. Requests are fixed to the official endpoint with
+  bounded JSON/base64/pixels, inline media only, trusted workers, safety filtering,
+  10-minute per-image timeout and best-effort remote cancellation. No private
+  website endpoints, cookies, browser downloads or paid service are used.
+- Image jobs share the global lock. Stale edits, concurrent render/Drive/music,
+  missing consent and unapproved auto-rendering are rejected. Failures/cancellation
+  retain the previous scene plan; original images and per-image provenance remain.
+  Jobs store prompts/remote IDs and recover explicitly as failed after restart.
+- 69 offline tests passed, including cancellation/timeout, unsafe output URLs,
+  censored output, no eligible workers, bounded responses, partial failure receipts,
+  startup failure, restart and approval preservation. Ruff lint/format, compileall,
+  controller syntax, 158 unique HTML IDs and all 106 controller ID references passed.
+
+Live evidence on this PC:
+
+- An anonymous API trial generated and validated a 512x768 pasture image.
+- Browser started a three-scene app job ec8b4fcd-9b14-4c43-ae0e-30712951cee7.
+  Two images completed, the third was filtered. Failure restored the previous
+  completed project, preserved files and displayed the provider error. No fallback.
+- Browser retried two landscape scenes with explicit network confirmation and
+  automatic rendering of the existing approved technical demo. Job
+  05b041fb-dcdf-4b4c-9ae1-b93847ce7268 completed in 68 seconds. Both returned originals,
+  JPEG checksums, model/seed IDs and provenance verified.
+- It automatically started render 3f6bc472-f310-4106-9a32-1a4443acf2bf, completed in
+  33 seconds. Actual output: 18.72s, 1080x1920 H.264/AAC stereo, music -24 dB below
+  measured narration before additional ducking, mixed PCM peak -1.41 dBFS.
+- Both generated scenes/thumbs and HTTP 206 video preview verified. An extracted
+  frame was visually checked for landscape composition and readable captions.
+- This is a technical demo using an existing approved script, not an automatically
+  approved new Bible reflection. Draft image sources are 512x768, then cropped and
+  scaled for the vertical video. Quality, filtering and wait time vary by provider.
+- Evidence: ignored temp/ai-horde-evidence.json, temp/ai-horde-frame.jpg and
+  temp/selahframe-ai-horde.png. Original earlier artwork/exports are retained.
+- Project bb723818-8b32-449b-bc6b-9cb4c7115c6f remains open in the working studio.
+- No paid account/subscription or public deployment was activated. No GitHub push;
+  user asked for push/deployment instructions and will perform those actions.
+
+---
+
 # Quieter music and cinematic provider research — 2026-10-19
 
 - User reported excessive music volume. Music is now scaled relative to the actual
