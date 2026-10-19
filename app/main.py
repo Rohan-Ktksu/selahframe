@@ -11,6 +11,7 @@ import warnings
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import requests
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app import cinematic, media
+from app import cinematic, media, security
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -29,10 +30,11 @@ Image.MAX_IMAGE_PIXELS = 20_000_000
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "12")) * 1024 * 1024
 MAX_MUSIC_BYTES = int(os.getenv("MAX_MUSIC_MB", "25")) * 1024 * 1024
 BUSY_STATUSES = {"rendering", "uploading", "importing_music", "generating_images"}
-DATA = ROOT / "data"
-DATA.mkdir(exist_ok=True)
+STORAGE = Path(os.getenv("SELAHFRAME_STORAGE", str(ROOT))).resolve()
+DATA = STORAGE / "data"
+DATA.mkdir(parents=True, exist_ok=True)
 DB = DATA / "projects.sqlite3"
-OUTPUT = ROOT / "output"
+OUTPUT = STORAGE / "output"
 OUTPUT.mkdir(exist_ok=True)
 PIPER_DATA_DIR = ROOT / "voices"
 PIPER_DATA_DIR.mkdir(exist_ok=True)
@@ -40,6 +42,7 @@ PIPER_DATA_DIR.mkdir(exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(application):
+    security.validate()
     # Only one process may own jobs in this checkout. Importing this module has no DB side effects.
     handle = (DATA / "server.lock").open("a+b")
     if handle.tell() == 0:
@@ -68,12 +71,31 @@ async def lifespan(application):
 
 
 app = FastAPI(title="SelahFrame", version="0.5.0", lifespan=lifespan)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+
+allowed_hosts = ["127.0.0.1", "localhost", "testserver"]
+if security.public_origin():
+    allowed_hosts.append(urlsplit(security.public_origin()).hostname)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 app.mount("/static", StaticFiles(directory=ROOT / "app" / "static"), name="static")
 
 
 @app.middleware("http")
 async def local_origin_guard(request, call_next):
+    origin_url = security.public_origin()
+    if (
+        origin_url
+        and request.url.path != "/healthz"
+        and not security.authorized(request.headers.get("authorization", ""))
+    ):
+        return JSONResponse(
+            {"detail": "Sign in to SelahFrame"},
+            status_code=401,
+            headers={
+                "WWW-Authenticate": 'Basic realm="SelahFrame", charset="UTF-8"',
+                "Cache-Control": "no-store",
+            },
+        )
+
     if request.method == "POST" and request.url.path.endswith(("/images", "/music/tracks")):
         is_music = request.url.path.endswith("/music/tracks")
         cap = MAX_MUSIC_BYTES if is_music else MAX_UPLOAD_BYTES
@@ -87,9 +109,23 @@ async def local_origin_guard(request, call_next):
             )
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
         origin = request.headers.get("origin")
-        if origin and origin not in {"http://127.0.0.1:8000", "http://localhost:8000"}:
+        allowed_origins = (
+            {origin_url} if origin_url else {"http://127.0.0.1:8000", "http://localhost:8000"}
+        )
+        if origin and origin not in allowed_origins:
             return JSONResponse({"detail": "Cross-origin changes are not allowed"}, status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    if origin_url:
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Strict-Transport-Security"] = "max-age=86400"
+    return response
+
+
+@app.get("/healthz")
+def healthcheck():
+    return {"ok": True}
 
 
 @contextmanager

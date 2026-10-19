@@ -1,0 +1,27 @@
+# Unused prototype: deployment paused; user requested Vercel and a cloud backend.
+services:
+  - type: web
+    name: selahframe
+    runtime: docker
+    plan: standard
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    numInstances: 1
+    autoDeployTrigger: "off"
+    disk:
+      name: selahframe-storage
+      mountPath: /var/lib/selahframe
+      sizeGB: 10
+    envVars:
+      - key: SELAHFRAME_USER
+        value: owner
+      - key: SELAHFRAME_PASSWORD
+        generateValue: true
+      - key: SELAHFRAME_ONLINE
+        value: "1"
+      - key: SELAHFRAME_STORAGE
+        value: /var/lib/selahframe
+      - key: MAX_RENDER_DISK_GB
+        value: "2"
+      - key: MAX_CONCURRENT_JOBS
+        value: "1"

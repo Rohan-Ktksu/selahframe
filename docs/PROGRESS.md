@@ -1,3 +1,22 @@
+# Deployment checkpoint — paused by user, 2026-10-19
+
+- User asked to stop deployment work, push current progress and create GitHub issues.
+- Optional online owner Basic authentication, HTTPS origin/host checks, public minimal
+  health check and configurable persistent storage are implemented. Local operation
+  remains unchanged. Online container startup rejects missing/weak credentials.
+- Added a draft CPU Dockerfile/entrypoint with FFmpeg/Piper/voice and persistent data
+  directories; runs as UID 10001 after initializing the volume. Not built here:
+  Docker is unavailable on this workstation. No actual hosted render was tested.
+- Render blueprint/docs were drafted, then the user said Render was unavailable and
+  chose Vercel. User requires rendering to run entirely in the cloud. This split
+  architecture has not been implemented. Render files are marked unused prototypes.
+- 74 offline tests passed, including authentication, protected routes, cross-origin
+  rejection, URL/password startup validation and provider URL configuration. Lint,
+  formatting and syntax checks passed. No cloud account, subscription or deployment
+  was activated. Existing local AI Horde/video functionality remains the tested path.
+
+---
+
 # Free AI Horde image generation — 2026-10-19
 
 - User selected AI Horde before any paid service. Added an optional AI Horde adapter;

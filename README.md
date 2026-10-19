@@ -66,3 +66,9 @@ There is no paid fallback. See [provider research](docs/IMAGE_PROVIDERS.md).
 Music defaults to 24 dB below measured narration volume, with additional speech
 ducking. Older louder settings are lowered once; previous exports remain on disk.
 Render again after saving audio edits to hear the new balance.
+
+
+Online deployment preparation is paused. Optional owner authentication, configurable
+persistent storage and a draft Docker image are included, but no cloud deployment
+has been tested or activated. Vercel frontend plus a fully cloud-hosted rendering
+backend remains unfinished. See [deployment checkpoint](docs/DEPLOY.md).
