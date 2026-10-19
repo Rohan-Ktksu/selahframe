@@ -703,6 +703,35 @@ class AppTests(unittest.TestCase):
                 c.execute("SELECT COUNT(*) FROM jobs WHERE status='running'").fetchone()[0], 1
             )
 
+    def test_music_defaults_and_voice_relative_range(self):
+        plan = self.client.get(self.url + "/music").json()
+        self.assertEqual(plan["gain_db"], -24)
+        for gain in (-11, -41):
+            self.assertEqual(
+                self.client.put(
+                    self.url + "/music", json={"music_revision": 0, "gain_db": gain}
+                ).status_code,
+                422,
+            )
+
+    def test_quiet_music_migration_preserves_approval_and_is_idempotent(self):
+        self.approve()
+        with m.connection() as c:
+            c.execute(
+                "UPDATE projects SET music_gain_db=-18, music_enabled=1, status='complete', drive_status='verified-size' WHERE id=?",
+                (self.pid,),
+            )
+            c.execute("PRAGMA user_version=4")
+        m.initialize()
+        first = self.client.get(self.url).json()
+        self.assertEqual(first["music_gain_db"], -24)
+        self.assertEqual(first["music_revision"], 1)
+        self.assertEqual(first["status"], "approved")
+        self.assertEqual(first["approved_version"], 1)
+        self.assertEqual(first["drive_status"], "")
+        m.initialize()
+        self.assertEqual(self.client.get(self.url).json()["music_revision"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

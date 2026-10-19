@@ -1,3 +1,39 @@
+# Quieter music and cinematic provider research — 2026-10-19
+
+- User reported excessive music volume. Music is now scaled relative to the actual
+  narration's all-channel PCM RMS, then ducked during speech. The default is -24 dB
+  below the voice; the editable range is -40 to -12 dB. Reduced the track audition
+  volume too. Voice gain is preserved; fade/loop/duration and peak protection remain.
+- Schema 5 lowers older louder settings once, invalidates enabled music exports
+  through their music revision, and retains script approval, originals and previous
+  exports. New projects explicitly get the new default even on an older SQLite table.
+- Real FFmpeg checks with normal (0.4 amplitude) and soft (0.01) gated speech tones:
+  music was 39.69 / 36.94 dB below speech; additional ducking 9.67 / 6.88 dB.
+  Peak checks cover both stereo channels. WAV/MP3/FLAC imports still passed.
+- 54 unit/API/media tests passed. New coverage checks migration idempotence,
+  approval preservation, defaults/range, stereo measurement and silence.
+- Re-rendered only the existing approved technical demo, not a new user script.
+  Project bb723818-8b32-449b-bc6b-9cb4c7115c6f; job
+  d06dea69-0a81-41e8-a101-b3cea3a258b4. Export is 18.92s, 1080x1920 H.264/AAC,
+  mixed PCM peak -1.41 dBFS; HTTP 206 playback response verified.
+- Browser verified saved -24 dB settings and new explanatory text in a fresh tab.
+  Existing tab had unsaved audio edits and was preserved.
+- Researched free image APIs at the user's request: see IMAGE_PROVIDERS.md. AI Horde
+  and Pollinations live catalogues returned HTTP 200; no provider was connected to
+  the app and no API generation success is claimed from catalogue checks.
+- User asked to explore Google AI Pro automation. Using the signed-in Flow UI,
+  created a project and generated three separate portrait stills (shepherd,
+  pasture, stream) with Nano Banana 2.1. These are interpretive imagery for
+  Psalm 23:1–2, not historical evidence. Browser download permission was declined;
+  no asset download workaround or app import was attempted after that rejection.
+  Flow project: https://flow.google.com/project/50f9f1b7-7914-4a86-a022-f2c44f320ac3
+- Automatic cinematic generation inside SelahFrame remains pending provider
+  selection/integration. Google website generation is demonstrated; repeatable
+  app-only subscription automation is not implemented or claimed.
+- No GitHub push. Development remains on D:.
+
+---
+
 # Sage Workspace UI — 2026-10-19
 
 User chose the third proposed theme, Sage Workspace. Implemented in D:\SelahFrame.

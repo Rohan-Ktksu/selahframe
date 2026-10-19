@@ -56,7 +56,7 @@ last rendered narration. Each export manifest records actual scene start/end tim
 GET music returns music_revision, asset_id, enabled (false by default), gain_db and
 track display metadata/preview URLs. PUT accepts those four settings, requires the
 current revision and a project-owned asset_id when enabled, and allows gain_db from
--30 to -6 (default -18). Stale edits return 409; no-op saves preserve the revision.
+-40 to -12 (default -24), measured below narration RMS before additional speech ducking. Stale edits return 409; no-op saves preserve the revision.
 Changed settings retain script approval and invalidate the current export. Preview,
 download, cache reuse and Drive admission all check the saved music revision.
 

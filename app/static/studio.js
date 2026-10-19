@@ -352,6 +352,7 @@ function paintMusic() {
   const track = state.music?.tracks.find(item => item.id === $("musicTrack").value);
   const audio = $("musicPreview");
   audio.hidden = !track;
+  audio.volume = Math.min(0.25, 10 ** (Number($("musicGain").value) / 20));
   if (track) {
     if (audio.getAttribute("src") !== track.preview_url) { audio.pause(); audio.src = track.preview_url; }
     $("musicAttribution").textContent = `${seconds(track.duration_ms)} · Source: ${track.source_url} · Rights: ${track.license_name}`;
@@ -359,7 +360,7 @@ function paintMusic() {
     audio.pause(); audio.removeAttribute("src");
     $("musicAttribution").textContent = "Import a track below to add music to your video.";
   }
-  $("musicGainLabel").textContent = $("musicGain").value + " dB";
+  $("musicGainLabel").textContent = $("musicGain").value + " dB below voice";
   $("audioBadge").textContent = $("musicEnabled").checked ? "Music on" : "Music off";
   $("sequenceMusic").textContent = state.musicDirty ? "Unsaved audio changes" : state.music?.enabled ? "Background music on" : "Music off";
   $("musicNotice").textContent = state.musicDirty ? "Unsaved audio changes. Save before rendering." : state.music?.enabled ? "Music is enabled for your next render." : "Music is off. Your next render uses narration only.";

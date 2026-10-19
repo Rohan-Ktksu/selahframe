@@ -53,30 +53,44 @@ def component(samples, rate, start, end, frequency):
 
 
 def calibrate(folder):
-    voice, track, mix = (folder / name for name in ("voice.wav", "tone.wav", "mix.wav"))
-    make_wave(
-        voice,
-        8,
-        lambda t: 0.4 * math.sin(2 * math.pi * 1000 * t) if 1 <= t < 3 or 5 <= t < 7 else 0,
-    )
-    make_wave(track, 2, lambda t: 0.2 * math.sin(2 * math.pi * 220 * t))
-    media.mix_music(voice, track, mix, 8, -12, 10 * 1024**2)
-    rate, samples = read_wave(mix)
-    quiet = component(samples, rate, 4.2, 4.7, 220)
-    under_voice = component(samples, rate, 2, 2.5, 220)
-    reduction = 20 * math.log10(quiet / under_voice)
-    voice_level = component(samples, rate, 2, 2.5, 1000)
-    peak = max(abs(v) for v in samples) / 32767
-    assert reduction >= 6, ("Ducking too weak", reduction)
-    assert abs(voice_level - 0.4) < 0.01, ("Voice level changed", voice_level)
-    assert peak < 0.86, ("Mix clipped", peak)
-    assert abs(len(samples) / rate - 8) < 0.01
-    return {
-        "ducking_reduction_db": round(reduction, 2),
-        "voice_amplitude": round(voice_level, 4),
-        "peak_dbfs": round(20 * math.log10(peak), 2),
-        "duration_seconds": len(samples) / rate,
-    }
+    results = {}
+    for label, amplitude in (("normal", 0.4), ("soft", 0.01)):
+        voice, track, mix = (
+            folder / (label + name) for name in ("-voice.wav", "-tone.wav", "-mix.wav")
+        )
+        make_wave(
+            voice,
+            8,
+            lambda t: (
+                amplitude * math.sin(2 * math.pi * 1000 * t) if 1 <= t < 3 or 5 <= t < 7 else 0
+            ),
+        )
+        make_wave(track, 2, lambda t: 0.8 * math.sin(2 * math.pi * 220 * t))
+        media.mix_music(voice, track, mix, 8, -24, 10 * 1024**2)
+        rate, samples = read_wave(mix)
+        quiet = component(samples, rate, 4.2, 4.7, 220)
+        under_voice = component(samples, rate, 2, 2.5, 220)
+        voice_level = component(samples, rate, 2, 2.5, 1000)
+        reduction = 20 * math.log10(quiet / max(under_voice, 1e-9))
+        relative = 20 * math.log10(max(under_voice, 1e-9) / voice_level)
+        with wave.open(str(mix), "rb") as audio:
+            all_samples = array.array("h", audio.readframes(audio.getnframes()))
+        if sys.byteorder != "little":
+            all_samples.byteswap()
+        peak = max(abs(v) for v in all_samples) / 32767
+        assert reduction >= 6, (label, "Ducking too weak", reduction)
+        assert relative <= -24, (label, "Music louder than requested", relative)
+        assert abs(voice_level - amplitude) < max(0.001, amplitude * 0.01)
+        assert peak < 0.86
+        assert abs(len(samples) / rate - 8) < 0.01
+        results[label] = {
+            "ducking_db": round(reduction, 2),
+            "music_below_voice_db": round(relative, 2),
+            "peak_dbfs": round(20 * math.log10(peak), 2),
+        }
+    # Keep a source for the import-format regression.
+    make_wave(folder / "tone.wav", 2, lambda t: 0.2 * math.sin(2 * math.pi * 220 * t))
+    return results
 
 
 def check_import_formats(folder):

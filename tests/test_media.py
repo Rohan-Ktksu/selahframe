@@ -68,7 +68,7 @@ class MediaTests(unittest.TestCase):
 
     def test_music_rejects_unsafe_gain_and_unsupported_narration(self):
         for duration, gain, channels in [
-            (8, 0, 1),
+            (8, 1, 1),
             (8, float("nan"), 1),
             (200, -18, 1),
             (8, -18, 6),
@@ -96,3 +96,20 @@ class MediaTests(unittest.TestCase):
                 with self.assertRaises(media.MediaError):
                     media.normalize_music(Path("test.wav"), Path("normalized.wav"), 40 * 1024**2)
             run.assert_called_once()
+
+    def test_pcm_level_measures_both_channels_and_silence(self):
+        import array
+        import math
+        import wave
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stereo.wav"
+            with wave.open(str(path), "wb") as audio:
+                audio.setparams((2, 2, 32000, 0, "NONE", "not compressed"))
+                # Silent left, constant right: all-channel mean square is half the right.
+                audio.writeframes(array.array("h", [0, 8192] * 3200).tobytes())
+            self.assertAlmostEqual(media.pcm_level(path), 10 * math.log10(0.25**2 / 2), places=4)
+            with wave.open(str(path), "wb") as audio:
+                audio.setparams((1, 2, 32000, 0, "NONE", "not compressed"))
+                audio.writeframes(b"\0\0" * 3200)
+            self.assertEqual(media.pcm_level(path), -120)

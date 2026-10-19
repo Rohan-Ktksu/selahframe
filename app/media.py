@@ -1,6 +1,7 @@
 """CPU media pipeline. No network downloads occur while rendering."""
 
 import hashlib
+import array
 import importlib.util
 import json
 import math
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import wave
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -349,8 +351,8 @@ def normalize_music(source, destination, max_bytes):
 
 
 def music_filter(duration, gain_db, voice_channels):
-    if not math.isfinite(gain_db) or not -30 <= gain_db <= -6:
-        raise MediaError("Music level must be between -30 and -6 dB.")
+    if not math.isfinite(gain_db) or not -96 <= gain_db <= 0:
+        raise MediaError("Invalid calculated music attenuation.")
     if not 0.2 <= duration <= 180 or voice_channels not in (1, 2):
         raise MediaError("Invalid narration audio for music mixing.")
     voice = "pan=stereo|c0=c0|c1=c0," if voice_channels == 1 else ""
@@ -360,13 +362,38 @@ def music_filter(duration, gain_db, voice_channels):
         f"[1:a]aresample=48000,atrim=duration={duration:.6f},asetpts=PTS-STARTPTS,"
         f"volume={gain_db:.3f}dB,afade=t=in:d={fade:.6f},"
         f"afade=t=out:st={duration - fade:.6f}:d={fade:.6f}[bed];"
-        "[bed][key]sidechaincompress=threshold=0.025:ratio=8:attack=15:release=350[ducked];"
+        "[key]acompressor=threshold=0.003:ratio=2:makeup=8[trigger];"
+        "[bed][trigger]sidechaincompress=threshold=0.008:ratio=10:attack=8:release=500:mix=0.7[ducked];"
         "[voice][ducked]amix=inputs=2:duration=first:normalize=0,"
         "alimiter=limit=0.85:level=false:latency=true[out]"
     )
 
 
+def pcm_level(path):
+    """Measure all channels of bounded 16-bit PCM without logging private audio."""
+    energy = count = 0
+    try:
+        with wave.open(str(path), "rb") as audio:
+            if audio.getsampwidth() != 2 or audio.getcomptype() != "NONE":
+                raise MediaError("Music mixing requires 16-bit PCM audio.")
+            if audio.getnframes() / audio.getframerate() > 301:
+                raise MediaError("Audio exceeds the mixing duration limit.")
+            while block := audio.readframes(8192):
+                samples = array.array("h", block)
+                if sys.byteorder != "little":
+                    samples.byteswap()
+                energy += sum(sample * sample for sample in samples)
+                count += len(samples)
+    except (wave.Error, EOFError, OSError) as exc:
+        raise MediaError("Cannot measure the local audio for music mixing.") from exc
+    return 10 * math.log10(max(energy / max(count, 1) / 32768**2, 1e-12))
+
+
 def mix_music(voice, music, destination, duration, gain_db, max_bytes):
+    if not math.isfinite(gain_db) or not -40 <= gain_db <= -12:
+        raise MediaError("Music level must be between -40 and -12 dB below narration.")
+    # Cap the bed relative to THIS voice, including soft voices. Ducking is additional.
+    attenuation = max(-96, min(0, pcm_level(voice) - pcm_level(music) + gain_db))
     voice_audio = next(
         stream for stream in probe(voice)["streams"] if stream["codec_type"] == "audio"
     )
@@ -385,7 +412,7 @@ def mix_music(voice, music, destination, duration, gain_db, max_bytes):
             "-i",
             str(music),
             "-filter_complex",
-            music_filter(duration, gain_db, voice_audio["channels"]),
+            music_filter(duration, attenuation, voice_audio["channels"]),
             "-filter_complex_threads",
             "1",
             "-map",

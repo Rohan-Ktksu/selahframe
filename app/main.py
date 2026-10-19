@@ -128,7 +128,7 @@ def initialize():
             "placeholders": "INTEGER NOT NULL DEFAULT 0",
             "music_asset_id": "TEXT",
             "music_enabled": "INTEGER NOT NULL DEFAULT 0",
-            "music_gain_db": "REAL NOT NULL DEFAULT -18",
+            "music_gain_db": "REAL NOT NULL DEFAULT -24",
             "music_revision": "INTEGER NOT NULL DEFAULT 0",
         }.items():
             if name not in columns:
@@ -179,7 +179,6 @@ def initialize():
         """)
         for row in c.execute("SELECT id, placeholders FROM projects").fetchall():
             ensure_scenes(c, row["id"], bool(row["placeholders"]))
-        c.execute("PRAGMA user_version=4")
         for row in c.execute(
             "SELECT project_id, snapshot_json FROM jobs WHERE status IN ('queued', 'running')"
         ).fetchall():
@@ -201,6 +200,15 @@ def initialize():
         c.execute(
             "UPDATE projects SET status='failed', error='App stopped during render. Retry the approved script.' WHERE status='rendering'"
         )
+        if c.execute("PRAGMA user_version").fetchone()[0] < 5:
+            # Existing exports stay on disk; the quieter settings need a fresh render.
+            c.execute(
+                "UPDATE projects SET music_gain_db=-24, music_revision=music_revision+1, "
+                "status=CASE WHEN approved_version=script_version THEN 'approved' ELSE 'review' END, drive_status='', error='' "
+                "WHERE music_gain_db > -24 AND music_enabled=1"
+            )
+            c.execute("UPDATE projects SET music_gain_db=-24 WHERE music_gain_db > -24")
+        c.execute("PRAGMA user_version=5")
 
 
 def ensure_scenes(c, pid, placeholders):
@@ -259,7 +267,7 @@ class MusicSettings(BaseModel):
     music_revision: int = Field(ge=0)
     asset_id: str | None = Field(default=None, min_length=1, max_length=36)
     enabled: bool = False
-    gain_db: float = Field(default=-18, ge=-30, le=-6, allow_inf_nan=False)
+    gain_db: float = Field(default=-24, ge=-40, le=-12, allow_inf_nan=False)
 
 
 class NewProject(BaseModel):
@@ -343,7 +351,7 @@ def create_project(payload: NewProject):
     pid = str(uuid.uuid4())
     with connection() as c:
         c.execute(
-            "INSERT INTO projects (id, reference, scripture, title, translation, scripture_source, source_license, context_text, placeholders) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projects (id, reference, scripture, title, translation, scripture_source, source_license, context_text, placeholders, music_gain_db) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, -24)",
             (
                 pid,
                 payload.reference,
